@@ -4,7 +4,7 @@ case $script_args[0]
 when 'start'
     Dir['hack/scripts/ai/*.rb'].each { |f| load f }
 
-    if df.curview._raw_rtti_classname == 'viewscreen_titlest'
+    if df.curview._raw_rtti_classname == 'viewscreen_titlest' and not $AI_RANDOM_EMBARK
         df.curview.feed_keys(:SELECT)
         df.curview.feed_keys(:SELECT)
     end
@@ -38,3 +38,5 @@ else
         puts "AI not started (hint: ai start)"
     end
 end
+
+# vim: et:sw=4:ts=4

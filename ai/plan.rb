@@ -26,9 +26,11 @@ class DwarfAI
             setup_blueprint
             categorize_all
 
-            digroom find_room(:workshop) { |r| r.subtype == :Masons }
-            digroom find_room(:workshop) { |r| r.subtype == :Carpenters }
-            find_room(:workshop) { |r| !r.subtype }.subtype = :Masons
+            digroom find_room(:workshop) { |r| r.subtype == :Masons and r.misc[:workshop_level] == 0 }
+            digroom find_room(:workshop) { |r| r.subtype == :Carpenters and r.misc[:workshop_level] == 0 }
+            find_room(:workshop) { |r| !r.subtype and r.misc[:workshop_level] == 0 }.subtype = :Masons
+            find_room(:workshop) { |r| !r.subtype and r.misc[:workshop_level] == 1 }.subtype = :Masons
+            find_room(:workshop) { |r| !r.subtype and r.misc[:workshop_level] == 2 }.subtype = :Masons
             
             dig_garbagedump
         end
@@ -82,6 +84,8 @@ class DwarfAI
                     try_construct_workshop(t[1])
                 when :construct_stockpile
                     try_construct_stockpile(t[1])
+                when :construct_activityzone
+                    try_construct_activityzone(t[1])
                 when :setup_farmplot
                     try_setup_farmplot(t[1])
                 when :furnish
@@ -156,24 +160,29 @@ class DwarfAI
             freebed = @spare_bedroom
             if r =
                    (st = @important_workshops.shift and
-                    find_room(:workshop) { |_r| _r.subtype == st and _r.status == :plan }) ||
+                    find_room(:workshop) { |_r| _r.subtype == st and _r.status == :plan and _r.misc[:workshop_level] == 0 }) ||
                    find_room(:cistern)   { |_r| _r.status == :plan } ||
                    find_room(:well)      { |_r| _r.status == :plan } ||
                    find_room(:infirmary) { |_r| _r.status == :plan } ||
+                   (find_room(:cemetary) { |_r| _r.status == :plan } if not find_room(:cemetary) { |_r| _r.status != :plan }) ||
                    (st = @important_workshops2.shift and
-                    find_room(:workshop) { |_r| _r.subtype == st and _r.status == :plan }) ||
+                    find_room(:workshop) { |_r| _r.subtype == st and _r.status == :plan and _r.misc[:workshop_level] == 0 }) ||
+                   find_room(:pitcage) { |_r| _r.status == :plan } ||
                    find_room(:stockpile) { |_r| _r.misc[:stockpile_level] <= 1 and _r.status == :plan } ||
-                   find_room(:workshop)  { |_r| _r.subtype and _r.status == :plan } ||
+                   find_room(:workshop)  { |_r| _r.subtype and _r.status == :plan and _r.misc[:workshop_level] == 0 } ||
                    (@fort_entrance if not @fort_entrance.misc[:furnished]) ||
                    (@past_initial_phase = true ; false) ||
+                   find_room(:workshop)  { |_r| _r.subtype and _r.status == :plan and _r.misc[:workshop_level] == 1 } ||
                    find_room(:bedroom)   { |_r| not _r.owner and ((freebed -= 1) >= 0) and _r.status == :plan } ||
                    find_room(:nobleroom) { |_r| _r.status == :finished and not _r.misc[:furnished] } ||
                    find_room(:bedroom)   { |_r| _r.status == :finished and not _r.misc[:furnished] } ||
                    ifplan[find_room(:dininghall) { |_r| _r.layout.find { |f| f[:users] and f[:users].empty? } }] ||
                    ifplan[find_room(:barracks)   { |_r| _r.layout.find { |f| f[:users] and f[:users].empty? } }] ||
                    find_room(:stockpile) { |_r| _r.misc[:stockpile_level] <= 3 and _r.status == :plan } ||
+                   find_room(:workshop)  { |_r| _r.subtype and _r.status == :plan } ||
                    find_room(:cartway)   { |_r| _r.status == :plan } ||
                    find_room(:stockpile) { |_r| _r.status == :plan }
+                @ai.debug "checkidle #{@rooms.index(r) or @corridors.index(r)} #{r.type} #{r.subtype} #{r.status}"
                 wantdig(r)
                 if r.status == :finished
                     r.misc[:furnished] = true
@@ -204,17 +213,14 @@ class DwarfAI
                 tab << r
             }
 
-            df.onupdate_register_once('df-ai plan idleidle', 4) {
+            bg = df.onupdate_register_once('df-ai plan idleidle', 4) {
                 if r = tab.shift
+                    bg.description = "df-ai plan idleidle #{@rooms.index(r) or @corridors.index(r)} #{r.type} #{r.subtype}"
                     smooth_room(r)
                     false
                 else
                     true
                 end
-            }
-
-            ai.pop.worker_labor.each { |w, wl|
-                df.unit_find(w).status.labors[:DETAIL] = true
             }
         end
 
@@ -287,11 +293,19 @@ class DwarfAI
         end
 
         def getdiningroom(id)
-            if r = find_room(:farmplot) { |_r| _r.subtype == :food and _r.misc[:users].length < _r.w*_r.h*@dwarves_per_farmtile }
+            if r = find_room(:farmplot) { |_r| _r.subtype == :food and not _r.misc[:outdoor] and _r.misc[:users].length < _r.w*_r.h*@dwarves_per_farmtile }
                 wantdig(r)
                 r.misc[:users] << id
             end
-            if r = find_room(:farmplot) { |_r| _r.subtype == :cloth and _r.misc[:users].length < _r.w*_r.h*@dwarves_per_farmtile }
+            if r = find_room(:farmplot) { |_r| _r.subtype == :cloth and not _r.misc[:outdoor] and _r.misc[:users].length < _r.w*_r.h*@dwarves_per_farmtile }
+                wantdig(r)
+                r.misc[:users] << id
+            end
+            if r = find_room(:farmplot) { |_r| _r.subtype == :food and _r.misc[:outdoor] and _r.misc[:users].length < _r.w*_r.h*@dwarves_per_farmtile }
+                wantdig(r)
+                r.misc[:users] << id
+            end
+            if r = find_room(:farmplot) { |_r| _r.subtype == :cloth and _r.misc[:outdoor] and _r.misc[:users].length < _r.w*_r.h*@dwarves_per_farmtile }
                 wantdig(r)
                 r.misc[:users] << id
             end
@@ -513,7 +527,7 @@ class DwarfAI
         # queue a room for digging when other dig jobs are finished
         def wantdig(r)
             return true if r.misc[:queue_dig] or r.status != :plan
-            @ai.debug "wantdig #{@rooms.index(r)} #{r.type} #{r.subtype}"
+            @ai.debug "wantdig #{@rooms.index(r) or @corridors.index(r)} #{r.type} #{r.subtype}"
             r.misc[:queue_dig] = true
             r.dig(:plan)
             @tasks << [:wantdig, r]
@@ -521,7 +535,7 @@ class DwarfAI
 
         def digroom(r)
             return true if r.status != :plan
-            @ai.debug "digroom #{@rooms.index(r)} #{r.type} #{r.subtype}"
+            @ai.debug "digroom #{@rooms.index(r) or @corridors.index(r)} #{r.type} #{r.subtype}"
             r.misc.delete :queue_dig
             r.status = :dig
             r.dig
@@ -530,11 +544,11 @@ class DwarfAI
 
             r.layout.each { |f|
                 next if f[:item] == :floodgate 
-                next if f[:construction] or f[:dig]
+                next if f[:dig]
                 @tasks << [:furnish, r, f]
             }
 
-            if r.type == :workshop
+            if r.type == :workshop and r.misc[:workshop_level] == 0
                 # add minimal stockpile in front of workshop
                 if sptype = {:Masons => :stone, :Carpenters => :wood, :Craftsdwarfs => :refuse,
                         :Farmers => :food, :Fishery => :food, :Jewelers => :gems, :Loom => :cloth,
@@ -552,25 +566,6 @@ class DwarfAI
                 end
             end
 
-            if r.type == :cistern and r.subtype == :well
-                # preorder wall smoothing to speedup floor channeling
-                ((r.z1+1)..r.z2).each { |z|
-                    ((r.x1-1)..(r.x2+1)).each { |x|
-                        ((r.y1-1)..(r.y2+1)).each { |y|
-                            next if not t = df.map_tile_at(x, y, z) or t.designation.dig != :No
-                            case t.shape_basic
-                            when :Wall, :Floor
-                                t.designation.smooth = 1 if t.caption !~ /pillar|smooth/i
-                            end
-                        }
-                    }
-                }
-
-                ai.pop.worker_labor.each { |w, wl|
-                    df.unit_find(w).status.labors[:DETAIL] = !wl.include?(:MINE)
-                }
-            end
-
             if r.type != :corridor or r.h_z > 1
                 @nrdig += 1
                 @nrdig += 1 if r.w*r.h*r.h_z >= 10
@@ -580,7 +575,7 @@ class DwarfAI
         end
 
         def construct_room(r)
-            @ai.debug "construct #{@rooms.index(r)} #{r.type} #{r.subtype}"
+            @ai.debug "construct #{@rooms.index(r) or @corridors.index(r)} #{r.type} #{r.subtype}"
             case r.type
             when :corridor
                 furnish_room(r)
@@ -595,8 +590,9 @@ class DwarfAI
                 construct_cistern(r)
             when :cemetary
                 furnish_room(r)
-            when :infirmary, :pasture
-                construct_activityzone(r)
+            when :infirmary, :pasture, :pitcage
+                furnish_room(r)
+                @tasks << [:construct_activityzone, r]
             when :dininghall
                 if t = find_room(:dininghall) { |_r| _r.misc[:temporary] } and not r.misc[:temporary]
                     move_dininghall_fromtemp(r, t)
@@ -615,7 +611,8 @@ class DwarfAI
         FurnitureBuilding = Hash.new { |h, k| h[k] = k.to_s.capitalize.to_sym }.update :chest => :Box,
             :gear_assembly => :GearAssembly,
             :vertical_axle => :AxleVertical,
-            :traction_bench => :TractionBench
+            :traction_bench => :TractionBench,
+            :nestbox => :NestBox
 
         def try_furnish(r, f)
             return true if f[:bld_id]
@@ -624,7 +621,7 @@ class DwarfAI
             return if not tgtile
             if f[:construction]
                 if try_furnish_construction(r, f, tgtile)
-                   return true if not f[:item]
+                    return true if not f[:item]
                 else
                     return  # dont try to furnish item before construction is done
                 end
@@ -653,12 +650,12 @@ class DwarfAI
             if tgtile.occupancy.building != :None
                 # TODO warn if this stays for too long?
                 false
-            elsif tgtile.shape == :RAMP or tgtile.shape == :TREE
+            elsif tgtile.shape == :RAMP or tgtile.tilemat == :TREE or tgtile.tilemat == :ROOT
                 tgtile.dig(f[:dig] || :Default)
                 false
             elsif itm ||= @ai.stocks.find_furniture_item(f[:item])
                 return if f[:subtype] == :cage and ai.stocks.count[:cage].to_i < 1  # avoid too much spam
-                @ai.debug "furnish #{@rooms.index(r)} #{r.type} #{r.subtype} #{f[:item]}"
+                @ai.debug "furnish #{@rooms.index(r) or @corridors.index(r)} #{r.type} #{r.subtype} #{f[:item]}"
                 bldn = FurnitureBuilding[f[:item]]
                 subtype = { :cage => :CageTrap, :lever => :Lever, :trackstop => :TrackStop }.fetch(f[:subtype], -1)
                 bld = df.building_alloc(bldn, subtype)
@@ -764,6 +761,13 @@ class DwarfAI
                 return
             end
 
+            return if df.world.buildings.all.any? { |b|
+                b.z == t.z and
+                not b.room.extents and
+                b.x1 <= t.x and b.x2 >= t.x and
+                b.y1 <= t.y and b.y2 >= t.y
+            }
+
             if block = df.world.items.other[:BLOCKS].find { |i| ai.stocks.is_item_free(i) }
                 bld = df.building_alloc(:Construction, ctype)
                 df.building_position(bld, t)
@@ -837,7 +841,7 @@ class DwarfAI
 
             if t.occupancy.building != :None
                 return
-            elsif t.shape == :RAMP or t.shape == :TREE
+            elsif t.shape == :RAMP or t.tilemat == :TREE or t.tilemat == :ROOT
                 # XXX dont remove last access ramp ?
                 t.dig(:Default)
                 return
@@ -855,6 +859,8 @@ class DwarfAI
         end
 
         def try_construct_workshop(r)
+            return unless r.constructions_done?
+
             case r.subtype
             when :Dyers
                 # barrel, bucket
@@ -972,8 +978,8 @@ class DwarfAI
         end
 
         def try_construct_stockpile(r)
-            return if not r.dug?
-            return if not r.constructions_done?
+            return unless r.constructions_done?
+
             bld = df.building_alloc(:Stockpile)
             df.building_position(bld, r)
             bld.room.extents = df.malloc(r.w*r.h)
@@ -1020,7 +1026,9 @@ class DwarfAI
             true
         end
 
-        def construct_activityzone(r)
+        def try_construct_activityzone(r)
+            return unless r.constructions_done?
+
             bld = df.building_alloc(:Civzone, :ActivityZone)
             bld.zone_flags.active = true
             case r.type
@@ -1038,6 +1046,8 @@ class DwarfAI
             when :pasture
                 bld.zone_flags.pen_pasture = true
                 # pit_flags |= 2
+            when :pitcage
+                bld.zone_flags.pit_pond = true
             end
             df.building_position(bld, r)
             bld.room.extents = df.malloc(r.w*r.h)
@@ -1049,7 +1059,8 @@ class DwarfAI
             bld.is_room = 1
             df.building_construct_abstract(bld)
             r.misc[:bld_id] = bld.id
-            furnish_room(r)
+
+            true
         end
 
         def setup_stockpile_settings(subtype, bld, r=nil)
@@ -1057,7 +1068,7 @@ class DwarfAI
             when :stone
                 bld.settings.flags.stone = true
                 t = bld.settings.stone.mats
-                   if r and r.misc[:workshop] and r.misc[:workshop].subtype == :Masons
+                if r and r.misc[:workshop] and r.misc[:workshop].subtype == :Masons
                     df.world.raws.inorganics.length.times { |i|
                         t[i] = (df.ui.economic_stone[i] ? 0 : 1)
                     }
@@ -1079,11 +1090,11 @@ class DwarfAI
                     bld.settings.flags.furniture = true
                     bld.settings.furniture.sand_bags = true
                     s = bld.settings.furniture
-                    60.times { |i| s.type[i] = true }   # 33, hardcoded (28 ItemTypes, 4 ToolUses, 1 SandBags)
+                    DFHack::FurnitureType::ENUM.length.times { |i| s.type[i] = true }
                 when :finished_goods
                     bld.settings.flags.finished_goods = true
                     s = bld.settings.finished_goods
-                    150.times { |i| s.type[i] = true }  # 112 (== refuse)
+                    DFHack::ItemType::ENUM.length.times { |i| s.type[i] = true }
                     bld.max_bins = r.w*r.h if r
                 when :ammo
                     bld.settings.flags.ammo = true
@@ -1111,7 +1122,7 @@ class DwarfAI
                     s.unusable = true
                     bld.max_bins = r.w*r.h if r
                 end
-                30.times { |i| s.other_mats[i] = true }    # 10
+                30.times { |i| s.other_mats[i] = true }
                 df.world.raws.inorganics.length.times { |i| s.mats[i] = true }
                 s.quality_core.map! { true }
                 s.quality_total.map! { true }
@@ -1125,23 +1136,24 @@ class DwarfAI
                 bld.settings.refuse.fresh_raw_hide = false
                 bld.settings.refuse.rotten_raw_hide = true
                 t = bld.settings.refuse
-                150.times { |i| t.type[i] = true }  # 112, ItemType enum + other stuff
                 if r and r.misc[:workshop] and r.misc[:workshop].subtype == :Craftsdwarfs
                     df.world.raws.creatures.all.length.times { |i|
                         t.corpses[i] = t.body_parts[i] = t.hair[i] = false
                         t.skulls[i] = t.bones[i] = t.shells[i] = t.teeth[i] = t.horns[i] = true
                     }
                 elsif subtype == :corpses
+                    DFHack::ItemType::ENUM.length.times { |i| t.type[i] = true }
+                    t.type[DFHack::ItemType::NUME[:REMAINS]] = t.type[DFHack::ItemType::NUME[:PLANT]] = t.type[DFHack::ItemType::NUME[:PLANT_GROWTH]] = false
                     df.world.raws.creatures.all.length.times { |i|
-                        t.corpses[i] = true
-                        t.body_parts[i] = t.skulls[i] = t.bones[i] = t.hair[i] =
-                            t.shells[i] = t.teeth[i] = t.horns[i] = false
+                        t.body_parts[i] = t.corpses[i] = true
+                        t.skulls[i] = t.bones[i] = t.hair[i] = t.shells[i] = t.teeth[i] = t.horns[i] = false
                     }
                 else
+                    bld.settings.refuse.fresh_raw_hide = true
+                    bld.settings.refuse.rotten_raw_hide = false
                     df.world.raws.creatures.all.length.times { |i|
-                        t.corpses[i] = false
-                        t.body_parts[i] = t.skulls[i] = t.bones[i] = t.hair[i] =
-                            t.shells[i] = t.teeth[i] = t.horns[i] = true
+                        t.corpses[i] = t.body_parts[i] = false
+                        t.skulls[i] = t.bones[i] = t.hair[i] = t.shells[i] = t.teeth[i] = t.horns[i] = true
                     }
                 end
             when :food
@@ -1149,26 +1161,33 @@ class DwarfAI
                 bld.max_barrels = r.w*r.h if r
                 t = bld.settings.food
                 mt = df.world.raws.mat_table
-                   if r and r.misc[:workshop] and r.misc[:workshop].type == :farmplot
+                if r and r.misc[:workshop] and r.misc[:workshop].type == :farmplot
                     mt.organic_types[:Seed].length.times { |i| t.seeds[i] = true }
                 elsif r and r.misc[:workshop] and r.misc[:workshop].subtype == :Farmers
                     mt.organic_types[:Plants].length.times { |i|
                         # include MILL because the quern is near
                         plant = df.decode_mat(mt.organic_types[:Plants][i], mt.organic_indexes[:Plants][i]).plant
-                        t.plants[i] = (plant.flags[:THREAD] or plant.flags[:LEAVES] or plant.flags[:MILL]) if plant
+                        t.plants[i] = (plant.flags[:THREAD] or plant.flags[:MILL]) if plant
                     }
                 elsif r and r.misc[:workshop] and r.misc[:workshop].subtype == :Still
                     mt.organic_types[:Plants].length.times { |i|
                         plant = df.decode_mat(mt.organic_types[:Plants][i], mt.organic_indexes[:Plants][i]).plant
                         t.plants[i] = plant.flags[:DRINK] if plant
                     }
+                    mt.organic_types[:Leaf].length.times { |i|
+                        plant = df.decode_mat(mt.organic_types[:Leaf][i], mt.organic_indexes[:Leaf][i]).plant
+                        t.leaves[i] = plant.flags[:DRINK] if plant
+                    }
                 elsif r and r.misc[:workshop] and r.misc[:workshop].subtype == :Kitchen
+                    mt.organic_types[:Meat          ].length.times { |i| t.meat[i]            = true }
+                    mt.organic_types[:Fish          ].length.times { |i| t.fish[i]            = true }
+                    mt.organic_types[:Eggs          ].length.times { |i| t.egg[i]             = true }
                     mt.organic_types[:Leaf          ].length.times { |i| t.leaves[i]          = true }
                 elsif r and r.misc[:workshop] and r.misc[:workshop].subtype == :Fishery
                     mt.organic_types[:UnpreparedFish].length.times { |i| t.unprepared_fish[i] = true }
                 else
                     bld.settings.food.prepared_meals = true
-                    mt.organic_types[:Meat          ].length.times { |i| t.meat[i]            = true }    # XXX very big (10588)
+                    mt.organic_types[:Meat          ].length.times { |i| t.meat[i]            = true }
                     mt.organic_types[:Fish          ].length.times { |i| t.fish[i]            = true }
                     mt.organic_types[:UnpreparedFish].length.times { |i| t.unprepared_fish[i] = true }
                     mt.organic_types[:Eggs          ].length.times { |i| t.egg[i]             = true }
@@ -1290,20 +1309,7 @@ class DwarfAI
         end
 
         def smooth_room(r)
-            (r.z1..r.z2).each { |z|
-                ((r.x1-1)..(r.x2+1)).each { |x|
-                    ((r.y1-1)..(r.y2+1)).each { |y|
-                        next unless t = df.map_tile_at(x, y, z)
-                        next if t.designation.hidden
-                        next if t.designation.dig != :No
-                        next if t.special == :TRACK
-                        case t.shape_basic
-                        when :Wall, :Floor
-                            t.dig :Smooth
-                        end
-                    }
-                }
-            }
+            smooth_xyz!((r.x1-1)..(r.x2+1), (r.y1-1)..(r.y2+1), (r.z1)..(r.z2))
         end
 
         # smooth a room and its accesspath corridors (recursive)
@@ -1313,20 +1319,19 @@ class DwarfAI
         end
 
         def smooth_cistern(r)
-            smooth_room_access(r)
+            r.accesspath.each { |a| smooth_room_access(a) }
 
-            ((r.z1+1)..r.z2).each { |z|
-                (r.x1..r.x2).each { |x|
-                    (r.y1..r.y2).each { |y|
+            tiles = []
+            (r.z1..r.z2).each { |z|
+                ((r.x1-1)..(r.x2+1)).each { |x|
+                    ((r.y1-1)..(r.y2+1)).each { |y|
+                        next if z != r.z1 and r.x1 <= x and r.x2 >= x and r.y1 <= y and r.y2 >= y
                         next unless t = df.map_tile_at(x, y, z)
-                        t.designation.smooth = 0
+                        tiles << t
                     }
                 }
             }
-
-            ai.pop.worker_labor.each { |w, wl|
-                df.unit_find(w).status.labors[:DETAIL] = !wl.include?(:MINE)
-            }
+            smooth!(*tiles)
         end
 
         def construct_cistern(r)
@@ -1370,30 +1375,94 @@ class DwarfAI
             }
         end
 
-        # check smoothing progress, channel intermediate floors when done
-        def try_digcistern(r)
-            issmooth = lambda { |t|
-                next if not t
-                next true if t.tilemat == :SOIL
-                case t.shape_basic
-                when :Wall; next true if t.caption =~ /pillar|smooth/i
-                when :Open; next true
+        def smooth_xyz!(xs, ys, zs)
+            tiles = []
+            xs.each { |x|
+                ys.each { |y|
+                    zs.each { |z|
+                        tiles << [x, y, z]
+                    }
+                }
+            }
+            smooth!(*tiles)
+        end
+
+        def smooth!(*tiles)
+            # get df tile references
+            tiles = tiles.map { |tile|
+                if Array === tile
+                    df.map_tile_at(*tile)
+                else
+                    df.map_tile_at(tile)
                 end
             }
 
+            # remove tiles that are not smoothable
+            tiles = tiles.reject { |tile|
+                next true unless tile
+
+                # not a smoothable material
+                next true if tile.tilemat != :STONE and tile.tilemat != :MINERAL
+
+                # already designated for something
+                next true if tile.designation.dig != :No or tile.designation.smooth != 0 or tile.designation.hidden
+
+                # already smooth
+                next true if smooth?(tile)
+
+                # wrong shape
+                next true if tile.shape_basic != :Wall and tile.shape_basic != :Floor
+            }
+
+            # remove tiles that are already being smoothed
+            df.world.job_list.each { |j|
+                if j.job_type == :DetailWall or j.job_type == :DetailFloor
+                    tiles = tiles.reject { |tile|
+                        df.same_pos?(j, tile)
+                    }
+                end
+            }
+
+            # mark the tiles to be smoothed!
+            tiles.each { |tile|
+                tile.designation.smooth = 1
+                tile.mapblock.flags.designated = true
+            }
+        end
+
+        def smooth?(t)
+            return if not t
+            t.tilemat == :SOIL or
+            t.tilemat == :GRASS_LIGHT or
+            t.tilemat == :GRASS_DARK or
+            t.tilemat == :PLANT or
+            t.tilemat == :ROOT or
+            t.special == :TRACK or
+            t.special == :SMOOTH or
+            t.tiletype == :FORTIFICATION or
+            t.shape_basic == :Open or
+            t.shape_basic == :Stair
+        end
+
+        # check smoothing progress, channel intermediate floors when done
+        def try_digcistern(r)
             # XXX hardcoded layout..
             cnt = 0
             acc_y = r.accesspath[0].y1
             ((r.z1+1)..r.z2).each { |z|
-                (r.x1..r.x2).each { |x|
+                (r.x1..r.x2).to_a.reverse.each { |x|
+                    stop = false
                     (r.y1..r.y2).each { |y|
                         next unless t = df.map_tile_at(x, y, z)
                         case t.shape_basic
                         when :Floor
-                            next unless issmooth[df.map_tile_at(x+1, y-1, z)]
-                            next unless issmooth[df.map_tile_at(x+1, y, z)]
-                            next unless issmooth[df.map_tile_at(x+1, y+1, z)]
-                            next unless nt01 = df.map_tile_at(x-1, y, z)
+                            if not smooth?(df.map_tile_at(x+1, y-1, z)) or
+                                not smooth?(df.map_tile_at(x+1, y, z)) or
+                                not smooth?(df.map_tile_at(x+1, y+1, z)) or
+                                not nt01 = df.map_tile_at(x-1, y, z)
+                                stop = true
+                                next
+                            end
                             if nt01.shape_basic == :Floor
                                 t.dig :Channel
                             else
@@ -1402,12 +1471,13 @@ class DwarfAI
                                 next unless nt12 = df.map_tile_at(x, y+1, z)
                                 next unless nt00 = df.map_tile_at(x-1, y-1, z)
                                 next unless nt02 = df.map_tile_at(x-1, y+1, z)
-                                t.dig :Channel if (y > acc_y ? issmooth[nt12] && issmooth[nt02] : issmooth[nt10] && issmooth[nt00])
+                                t.dig :Channel if (y > acc_y ? smooth?(nt12) && smooth?(nt02) : smooth?(nt10) && smooth?(nt00))
                             end
                         when :Open
                             cnt += 1 if x >= r.x1 and x <= r.x2 and y >= r.y1 and y <= r.y2
                         end
                     }
+                    break if stop
                 }
             }
 
@@ -1439,7 +1509,7 @@ class DwarfAI
                 t.dig(:Default) if t.shape_basic == :Ramp
                 @rooms.each { |r|
                     if r.type == :garbagedump and r.status == :plan
-                        construct_activityzone(r)
+                        try_construct_activityzone(r)
                     end
                 }
             else
@@ -1457,60 +1527,7 @@ class DwarfAI
             end
             return if bld.getBuildStage < bld.getMaxBuildStage
 
-            may = []
-            df.world.raws.plants.all.length.times { |i|
-                p = df.world.raws.plants.all[i]
-                next if not p.flags[:BIOME_SUBTERRANEAN_WATER]
-                may << i
-            }
-
-            # XXX 1st plot = the one with a door
-            isfirst = !r.layout.empty?
-            if r.subtype == :food
-                4.times { |season|
-                    pids = may.find_all { |i|
-                        p = df.world.raws.plants.all[i]
-
-                        # season numbers are also the 1st 4 flags
-                        next if not p.flags[season]
-
-                        pm = p.material[0]
-                        if isfirst
-                            pm.flags[:EDIBLE_RAW] and p.flags[:DRINK]
-                        else
-                            pm.flags[:EDIBLE_RAW] or pm.flags[:EDIBLE_COOKED] or p.flags[:DRINK] or p.flags[:LEAVES]
-                        end
-                    }
-
-                    bld.plant_id[season] = pids[rand(pids.length)] unless pids.empty?
-                }
-            else
-                threads = may.find_all { |i|
-                    p = df.world.raws.plants.all[i]
-                    p.flags[:THREAD]
-                }
-                dyes = may.find_all { |i|
-                    p = df.world.raws.plants.all[i]
-                    p.flags[:MILL] and df.decode_mat(p.material_defs.type_mill, p.material_defs.idx_mill).material.flags[:IS_DYE]
-                }
-
-                4.times { |season|
-                    pids = threads.find_all { |i|
-                        p = df.world.raws.plants.all[i]
-                        p.flags[season]
-                    }
-                    pids |= dyes.find_all { |i|
-                        # all plot gets dyes only if no thread candidate exists
-                        next if !pids.empty? #and isfirst
-                        p = df.world.raws.plants.all[i]
-                        p.flags[season]
-                    }
-
-                    bld.plant_id[season] = pids[rand(pids.length)] unless pids.empty?
-                }
-
-                # TODO repurpose fields if we have too much dimple dye or smth
-            end
+            ai.stocks.farmplot(r)
 
             true
         end
@@ -1529,7 +1546,7 @@ class DwarfAI
                 bld.burial_mode.no_citizens = false
                 bld.burial_mode.no_pets = true
             when :door
-                bld.door_flags.pet_passable = true if r.type == :corridor
+                bld.door_flags.pet_passable = true
                 bld.door_flags.internal = true if f[:internal]
             when :trap
                 return setup_lever(r, f) if f[:subtype] == :lever
@@ -1547,7 +1564,7 @@ class DwarfAI
             return true unless f[:makeroom]
             return unless r.dug?
 
-            @ai.debug "makeroom #{@rooms.index(r)} #{r.type} #{r.subtype}"
+            @ai.debug "makeroom #{@rooms.index(r) or @corridors.index(r)} #{r.type} #{r.subtype}"
 
             df.free(bld.room.extents._getp) if bld.room.extents
             bld.room.extents = df.malloc((r.w+2)*(r.h+2))
@@ -1619,6 +1636,8 @@ class DwarfAI
             return if not bld or bld.getBuildStage < bld.getMaxBuildStage
             tbld = df.building_find(dst[:bld_id])
             return if not tbld or tbld.getBuildStage < tbld.getMaxBuildStage
+            return if bld.general_refs.find { |ref| ref.kind_of?(DFHack::GeneralRefBuildingTriggertargetst) and
+                    ref.building_id == tbld.id }
             return if bld.jobs.find { |j| j.job_type == :LinkBuildingToTrigger and
                 j.general_refs.find { |ref| ref.kind_of?(DFHack::GeneralRefBuildingTriggertargetst) and
                     ref.building_id == tbld.id }
@@ -1709,8 +1728,8 @@ class DwarfAI
                     todo = [@m_c_reserve]
                     while empty and r = todo.shift
                         todo.concat r.accesspath
-                        empty = false if (r.x1..r.x2).find { |x| (r.y1..r.y2).find { |y| (r.z1..r.z2).find { |z|
-                            t = df.map_tile_at(x, y, z) and (t.designation.smooth == 1 or t.occupancy.unit)
+                        empty = false if ((r.x1-1)..(r.x2+1)).find { |x| ((r.y1-1)..(r.y2+1)).find { |y| (r.z1..r.z2).find { |z|
+                            t = df.map_tile_at(x, y, z) and (not smooth?(t) or t.occupancy.unit or t.occupancy.unit_grounded or t.occupancy.item)
                         } } }
                     end
 
@@ -1730,7 +1749,7 @@ class DwarfAI
                     # channel surrounding tiles
                     gate.spiral_search(1, 1) { |tt|
                         tm = tt.tilemat
-                        next if tt.shape_basic != :Wall or (tm != :STONE and tm != :MINERAL and tm != :SOIL)
+                        next if tt.shape_basic != :Wall or (tm != :STONE and tm != :MINERAL and tm != :SOIL and tm != :ROOT)
                         if tt.spiral_search(1) { |ttt| ttt.designation.feature_local }
                             tt.offset(0, 0, 1).dig(:Channel)
                         end
@@ -1790,7 +1809,7 @@ class DwarfAI
 
         # returns one tile of an outdoor river (if one exists)
         def scan_river
-            ifeat = df.world.cur_savegame.map_features.find { |f| f.kind_of?(DFHack::FeatureInitOutdoorRiverst) }
+            ifeat = df.world.features.map_features.find { |f| f.kind_of?(DFHack::FeatureInitOutdoorRiverst) }
             return if not ifeat
             feat = ifeat.feature
 
@@ -1816,7 +1835,6 @@ class DwarfAI
         attr_accessor :fort_entrance, :rooms, :corridors
         def setup_blueprint
             # TODO use existing fort facilities (so we can relay the user or continue from a save)
-            # TODO connect all parts of the map (eg river splitting north/south)
             puts 'AI: setting up fort blueprint...'
             # TODO place fort body first, have main stair stop before surface, and place trade depot on path to surface
             scan_fort_entrance
@@ -1828,15 +1846,66 @@ class DwarfAI
             @ai.debug 'blueprint found rooms'
             # ensure traps are on the surface
             @fort_entrance.layout.each { |i|
-                i[:z] = surface_tile_at(@fort_entrance.x1+i[:x], @fort_entrance.y1+i[:y]).z-@fort_entrance.z1
+                i[:z] = surface_tile_at(@fort_entrance.x1+i[:x], @fort_entrance.y1+i[:y], true).z-@fort_entrance.z1
             }
             @fort_entrance.layout.delete_if { |i|
                 t = df.map_tile_at(@fort_entrance.x1+i[:x], @fort_entrance.y1+i[:y], @fort_entrance.z1+i[:z]-1)
                 tm = t.tilemat
-                t.shape_basic != :Wall or (tm != :STONE and tm != :MINERAL and tm != :SOIL)
+                t.shape_basic != :Wall or (tm != :STONE and tm != :MINERAL and tm != :SOIL and tm != :ROOT)
             }
             list_map_veins
+            setup_outdoor_gathering_zones
+            make_map_walkable
             puts 'AI: ready'
+        end
+
+        def make_map_walkable
+            df.onupdate_register_once('df-ai plan make_map_walkable') {
+                # if we don't have a river, we're fine
+                next true unless river = scan_river
+                next true if surface = surface_tile_at(river) and surface.tilemat == :BROOK
+
+                river = spiral_search(river) { |t|
+                    # TODO rooms outline
+                    (t.y < @fort_entrance.y+MinY or t.y > @fort_entrance.y+MaxY) and
+                    t.designation.feature_local
+                }
+                next true unless river
+
+                # find a safe place for the first tile
+                t1 = spiral_search(river) { |t| map_tile_in_rock(t) and st = surface_tile_at(t) and map_tile_in_rock(st.offset(0, 0, -1)) }
+                next true unless t1
+                t1 = surface_tile_at(t1)
+
+                # if the game hasn't done any pathfinding yet, wait until the next frame and try again
+                next false if (t1w = t1.mapblock.walkable[t1.x & 15][t1.y & 15]) == 0
+
+                # find the second tile
+                t2 = spiral_search(t1) { |t| tw = t.mapblock.walkable[t.x & 15][t.y & 15] and tw != 0 and tw != t1w }
+                next true unless t2
+                t2w = t2.mapblock.walkable[t2.x & 15][t2.y & 15]
+
+                # make sure the second tile is in a safe place
+                t2 = spiral_search(t2) { |t| t.mapblock.walkable[t.x & 15][t.y & 15] == t2w and map_tile_in_rock(t.offset(0, 0, -1)) }
+
+                # find the bottom of the staircases
+                z = df.world.features.map_features.find { |f| f.kind_of?(DFHack::FeatureInitOutdoorRiverst) }.feature.min_map_z.min - 1
+
+                # make the corridors
+                cor = []
+                cor << Corridor.new(t1.x, t1.x, t1.y, t1.y, t1.z, z)
+                cor << Corridor.new(t2.x, t2.x, t2.y, t2.y, t2.z, z)
+                cor << Corridor.new(t1.x - (t1.x <=> t2.x), t2.x - (t2.x <=> t1.x), t1.y, t1.y, z, z) if (t1.x - t2.x).abs > 1
+                cor << Corridor.new(t2.x, t2.x, t1.y - (t1.y <=> t2.y), t2.y - (t2.y <=> t1.y), z, z) if (t1.y - t2.y).abs > 1
+                cor << Corridor.new(t2.x, t2.x, t1.y, t1.y, z, z) if (t1.x - t2.x).abs > 1 and (t1.y - t2.y).abs > 1
+
+                cor.each do |c|
+                    @corridors << c
+                    wantdig c
+                end
+
+                true
+            }
         end
 
         attr_accessor :map_veins
@@ -1863,7 +1932,7 @@ class DwarfAI
                 end
             }
         end
-   
+
         # mark a vein of a mat for digging, return expected boulder count
         def dig_vein(mat, want_boulders = 1)
             # mat => [x, y, z, dig_mode] marked for to dig
@@ -1875,7 +1944,9 @@ class DwarfAI
             if q = @map_vein_queue[mat]
                 q.delete_if { |x, y, z, dd|
                     t = df.map_tile_at(x, y, z)
-                    if t.shape_basic != :Wall
+                    if t.shape_basic == :Open
+                        try_furnish_construction(nil, {:construction => dd == :Default ? :Floor : dd}, t)
+                    elsif t.shape_basic != :Wall
                         true
                     else
                         t.dig(dd) if t.designation.dig == :No     # warm/wet tile
@@ -1912,7 +1983,7 @@ class DwarfAI
             fort_minz ||= @corridors.map { |c| c.z1 if c.subtype != :veinshaft }.compact.min
             if bz >= fort_minz
                 # TODO rooms outline
-                if by > @fort_entrance.y-30-16 and by < @fort_entrance.y+30
+                if by > @fort_entrance.y+MinY and by < @fort_entrance.y+MaxY
                     return count
                 end
             end
@@ -1933,8 +2004,11 @@ class DwarfAI
                 end
             } }
 
+            return count if dxs.empty?
+
             need_shaft = true
             todo = []
+            @ai.debug "do_dig_vein #{dxs.min}..#{dxs.max} #{dys.min}..#{dys.max}"
             (dxs.min..dxs.max).each { |dx| (dys.min..dys.max).each { |dy|
                 t = df.map_tile_at(bx+dx, by+dy, bz)
                 if t.designation.dig == :No
@@ -1964,23 +2038,7 @@ class DwarfAI
                 # TODO minecarts?
 
                 # avoid giant vertical runs: slalom x+-1 every z%16
-                vertshift = lambda { |t| t.offset(((t.z%32) >= 16 ? 1 : -1), 0) }
 
-                shaftop = df.map_tile_at(@fort_entrance.x, @fort_entrance.y, bz)
-                if by > @fort_entrance.y
-                    shaftop = shaftop.offset(0, 30)
-                else
-                    shaftop = shaftop.offset(0, -30)
-                end
-                shaftop = shaftop.offset(0, 0, 1) while vertshift[shaftop].designation.hidden
-                if map_tile_nocavern(vertshift[shaftop])
-                    if vertshift[shaftop].shape_passablelow
-                        shaftop = nil
-                    end
-                end
-
-
-                
                 if by > @fort_entrance.y
                     vert = df.map_tile_at(@fort_entrance.x, @fort_entrance.y+30, bz)   # XXX 30...
                 else
@@ -2037,12 +2095,15 @@ class DwarfAI
             nil
         end
 
+        MinX, MinY, MinZ = -48, -22, -5
+        MaxX, MaxY, MaxZ = 35, 22, 1
+
         # search a valid tile for fortress entrance
         def scan_fort_entrance
             # map center
             cx = df.world.map.x_count / 2
             cy = df.world.map.y_count / 2
-            center = surface_tile_at(cx, cy)
+            center = surface_tile_at(cx, cy, true)
             rangez = (0...df.world.map.z_count).to_a.reverse
             cz = rangez.find { |z| t = df.map_tile_at(cx, cy, z) and tsb = t.shape_basic and (tsb == :Floor or tsb == :Ramp) }
             center = df.map_tile_at(cx, cy, cz)
@@ -2050,21 +2111,25 @@ class DwarfAI
             ent0 = center.spiral_search { |t0|
                 # test the whole map for 3x5 clear spots
                 next unless t = surface_tile_at(t0)
+
+                # make sure we're not too close to the edge of the map.
+                next unless t.offset(MinX, MinY, MinZ) and t.offset(MaxX, MaxY, MaxZ)
+
                 (-1..1).all? { |_x|
                     (-2..2).all? { |_y|
-                        tt = t.offset(_x, _y, -1) and tt.shape == :WALL and tm = tt.tilemat and (tm == :STONE or tm == :MINERAL or tm == :SOIL) and
+                        tt = t.offset(_x, _y, -1) and tt.shape == :WALL and tm = tt.tilemat and (tm == :STONE or tm == :MINERAL or tm == :SOIL or tm == :ROOT) and
                         ttt = t.offset(_x, _y) and ttt.shape == :FLOOR and ttt.designation.flow_size == 0 and
                          not ttt.designation.hidden and not df.building_find(ttt)
+                    }
+                } and (-3..3).all? { |_x|
+                    (-4..4).all? { |_y|
+                        surface_tile_at(t.x + _x, t.y + _y, true)
                     }
                 }
             }
 
-            if not ent0
-                puts 'AI: cant find fortress entrance spot'
-                ent = center
-            else
-                ent = surface_tile_at(ent0)
-            end
+            raise 'Can\'t find a fortress entrance spot. We need a 3x5 flat area with solid ground for at least 2 tiles on each side.' unless ent0
+            ent = surface_tile_at(ent0)
 
             @fort_entrance = Corridor.new(ent.x, ent.x, ent.y-1, ent.y+1, ent.z, ent.z)
             3.times { |i|
@@ -2087,35 +2152,37 @@ class DwarfAI
         def scan_fort_body
             # use a hardcoded fort layout
             cx, cy, cz = @fort_entrance.x, @fort_entrance.y, @fort_entrance.z
-            sz_x, sz_y, sz_z = 35, 22, 5
+            if river = scan_river and river = surface_tile_at(river) and cz >= river.z
+                cz = river.z - 1
+            end
             @fort_entrance.z1 = (0..cz).to_a.reverse.find { |cz1|
-                (-sz_z..1).all? { |dz|
+                (MinZ..MaxZ).all? { |dz|
                     # scan perimeter first to quickly eliminate caverns / bad rock layers
-                    (-sz_x..sz_x).all? { |dx|
-                        [-sz_y, sz_y].all? { |dy|
+                    (MinX..MaxX).all? { |dx|
+                        [MinY, MaxY].all? { |dy|
                             t = df.map_tile_at(cx+dx, cy+dy, cz1+dz) and t.shape == :WALL and
-                            not t.designation.water_table and tm = t.tilemat and (tm == :STONE or tm == :MINERAL or (dz > -1 and tm == :SOIL))
+                            not t.designation.water_table and tm = t.tilemat and (tm == :STONE or tm == :MINERAL or (dz > -1 and (tm == :SOIL or tm == :ROOT)))
                         }
                     } and
-                    [-sz_x, sz_x].all? { |dx|
-                        (-sz_y..sz_y).all? { |dy|
+                    [MinX, MaxX].all? { |dx|
+                        (MinY..MaxY).all? { |dy|
                             t = df.map_tile_at(cx+dx, cy+dy, cz1+dz) and t.shape == :WALL and
-                            not t.designation.water_table and tm = t.tilemat and (tm == :STONE or tm == :MINERAL or (dz > -1 and tm == :SOIL))
+                            not t.designation.water_table and tm = t.tilemat and (tm == :STONE or tm == :MINERAL or (dz > -1 and (tm == :SOIL or tm == :ROOT)))
                         }
                     }
                 }  and
                 # perimeter ok, full scan
-                (-sz_z..1).all? { |dz|
-                    (-(sz_x-1)..(sz_x-1)).all? { |dx|
-                        (-(sz_y-1)..(sz_y-1)).all? { |dy|
+                (MinZ..MaxZ).all? { |dz|
+                    ((MinX+1)..(MaxX-1)).all? { |dx|
+                        ((MinY+1)..(MaxY-1)).all? { |dy|
                             t = df.map_tile_at(cx+dx, cy+dy, cz1+dz) and t.shape == :WALL and
-                            not t.designation.water_table and tm = t.tilemat and (tm == :STONE or tm == :MINERAL or (dz > -1 and tm == :SOIL))
+                            not t.designation.water_table and tm = t.tilemat and (tm == :STONE or tm == :MINERAL or (dz > -1 and (tm == :SOIL or tm == :ROOT)))
                         }
                     }
                 }
             }
 
-            raise 'Too many caverns, cant find room for fort. We need more minerals !' if not @fort_entrance.z1
+            raise 'Too many caverns, cant find room for fort. We need more minerals!' unless @fort_entrance.z1
         end
 
         # assign rooms in the space found by scan_fort_*
@@ -2154,6 +2221,7 @@ class DwarfAI
             @corridors << corridor_center2
 
             r = Room.new(:workshop, :TradeDepot, @fort_entrance.x-6, @fort_entrance.x-2, @fort_entrance.y-2, @fort_entrance.y+2, @fort_entrance.z2-1)
+            r.misc[:workshop_level] = 0
             r.layout << { :dig => :Ramp, :x => -1, :y => 1 }
             r.layout << { :dig => :Ramp, :x => -1, :y => 2 }
             r.layout << { :dig => :Ramp, :x => -1, :y => 3 }
@@ -2181,16 +2249,54 @@ class DwarfAI
                         # stuff a quern&screwpress near the farmers'
                         @rooms << Room.new(:workshop, :Quern, cx-2, cx-2, fy+1, fy+1, fz)
                         @rooms.last.accesspath = [cor_x]
+                        @rooms.last.misc[:workshop_level] = 0
+
+                        @rooms << Room.new(:workshop, :Quern, cx-6, cx-6, fy+1, fy+1, fz)
+                        @rooms.last.accesspath = [cor_x]
+                        @rooms.last.misc[:workshop_level] = 1
+
+                        @rooms << Room.new(:workshop, :Quern, cx+2, cx+2, fy+1, fy+1, fz)
+                        @rooms.last.accesspath = [cor_x]
+                        @rooms.last.misc[:workshop_level] = 2
+
                         @rooms << Room.new(:workshop, :ScrewPress, cx-2, cx-2, fy-1, fy-1, fz)
                         @rooms.last.accesspath = [cor_x]
+                        @rooms.last.misc[:workshop_level] = 0
                     end
 
-                    @rooms << Room.new(:workshop, types.shift, cx-1, cx+1, fy-5, fy-3, fz)
-                    @rooms << Room.new(:workshop, types.shift, cx-1, cx+1, fy+3, fy+5, fz)
-                    @rooms[-2, 2].each { |r|
-                        r.accesspath = [cor_x]
-                        r.layout << {:item => :door, :x => 1, :y => 1-2*(r.y<=>fy)}
-                    }
+                    t = types.shift
+                    @rooms << Room.new(:workshop, t, cx-1, cx+1, fy-5, fy-3, fz)
+                    @rooms.last.accesspath = [cor_x]
+                    @rooms.last.layout << {:item => :door, :x => 1, :y => 3}
+                    @rooms.last.misc[:workshop_level] = 0
+                    if dirx == -1 and dx == 1
+                        @rooms.last.layout << {:item => :nestbox, :x => -1, :y => 4}
+                    end
+
+                    @rooms << Room.new(:workshop, t, cx-1, cx+1, fy-8, fy-6, fz)
+                    @rooms.last.accesspath = [@rooms[@rooms.length - 2]]
+                    @rooms.last.misc[:workshop_level] = 1
+
+                    @rooms << Room.new(:workshop, t, cx-1, cx+1, fy-11, fy-9, fz)
+                    @rooms.last.accesspath = [@rooms[@rooms.length - 2]]
+                    @rooms.last.misc[:workshop_level] = 2
+
+                    t = types.shift
+                    @rooms << Room.new(:workshop, t, cx-1, cx+1, fy+3, fy+5, fz)
+                    @rooms.last.accesspath = [cor_x]
+                    @rooms.last.layout << {:item => :door, :x => 1, :y => -1}
+                    @rooms.last.misc[:workshop_level] = 0
+                    if dirx == -1 and dx == 1
+                        @rooms.last.layout << {:item => :nestbox, :x => -1, :y => -2}
+                    end
+
+                    @rooms << Room.new(:workshop, t, cx-1, cx+1, fy+6, fy+8, fz)
+                    @rooms.last.accesspath = [@rooms[@rooms.length - 2]]
+                    @rooms.last.misc[:workshop_level] = 1
+
+                    @rooms << Room.new(:workshop, t, cx-1, cx+1, fy+9, fy+11, fz)
+                    @rooms.last.accesspath = [@rooms[@rooms.length - 2]]
+                    @rooms.last.misc[:workshop_level] = 2
                 }
             }
         end
@@ -2357,9 +2463,15 @@ class DwarfAI
 
         def setup_blueprint_pitcage
             return if not gpit = find_room(:garbagepit)
-            r = Room.new(:stockpile, :animals, gpit.x1-1, gpit.x1+1, gpit.y1-1, gpit.y1+1, gpit.z1+3)
-            r.misc[:stockpile_level] = 0
-            r.layout << { :construction => :UpStair, :x => -1, :y => 1, :z => -3 }
+            r = Room.new(:pitcage, nil, gpit.x1-1, gpit.x1+1, gpit.y1-1, gpit.y1+1, gpit.z1+10)
+            r.layout << { :construction => :UpStair, :x => -1, :y => 1, :z => -10 }
+            r.layout << { :construction => :UpDownStair, :x => -1, :y => 1, :z => -9 }
+            r.layout << { :construction => :UpDownStair, :x => -1, :y => 1, :z => -8 }
+            r.layout << { :construction => :UpDownStair, :x => -1, :y => 1, :z => -7 }
+            r.layout << { :construction => :UpDownStair, :x => -1, :y => 1, :z => -6 }
+            r.layout << { :construction => :UpDownStair, :x => -1, :y => 1, :z => -5 }
+            r.layout << { :construction => :UpDownStair, :x => -1, :y => 1, :z => -4 }
+            r.layout << { :construction => :UpDownStair, :x => -1, :y => 1, :z => -3 }
             r.layout << { :construction => :UpDownStair, :x => -1, :y => 1, :z => -2 }
             r.layout << { :construction => :UpDownStair, :x => -1, :y => 1, :z => -1 }
             r.layout << { :construction => :DownStair, :x => -1, :y => 1, :z => 0 }
@@ -2372,6 +2484,10 @@ class DwarfAI
             } }
             r.layout << { :construction => :Floor, :x => 3, :y => 1, :item => :hive }
             @rooms << r
+            stockpile = Room.new(:stockpile, :animals, r.x1, r.x2, r.y1, r.y2, r.z1)
+            stockpile.misc[:stockpile_level] = 0
+            stockpile.layout = r.layout
+            @rooms << stockpile
         end
 
         def setup_blueprint_utilities(fx, fy, fz, entr)
@@ -2440,7 +2556,7 @@ class DwarfAI
             farm_h = 3
             farm_w = 3
             dpf = (@dwarves_per_farmtile * farm_h * farm_w).to_i
-            nrfarms = (200+dpf-1)/dpf
+            nrfarms = (220+dpf-1)/dpf
 
             cx = fx+4*6       # end of workshop corridor (last ws door)
             cy = fy
@@ -2454,8 +2570,8 @@ class DwarfAI
             soilcnt = {}
             (cz...df.world.map.z_count).each { |z|
                 scnt = 0
-                if (-1..(nrfarms*farm_w/2)).all? { |dx|
-                    (-(2*farm_h+2)..(2*farm_h+2)).all? { |dy|
+                if (-1..(nrfarms*farm_w/3)).all? { |dx|
+                    (-(3*farm_h+farm_h-1)..(3*farm_h+farm_h-1)).all? { |dy|
                         t = df.map_tile_at(cx+dx, cy+dy, z)
                         next if not t or t.shape != :WALL
                         scnt += 1 if t.tilemat == :SOIL
@@ -2465,7 +2581,7 @@ class DwarfAI
                     soilcnt[z] = scnt
                 end
             }
-            cz2 = soilcnt.index(soilcnt.values.max)
+            cz2 = soilcnt.index(soilcnt.values.max) || cz
 
             farm_stairs.z2 = cz2
             cor = Corridor.new(cx, cx+1, cy, cy, cz2, cz2)
@@ -2474,8 +2590,8 @@ class DwarfAI
             types = [:food, :cloth]
             [-1, 1].each { |dy|
                 st = types.shift
-                (nrfarms/2).times { |dx|
-                    2.times { |ddy|
+                (nrfarms/3).times { |dx|
+                    3.times { |ddy|
                         r = Room.new(:farmplot, st, cx+farm_w*dx, cx+farm_w*dx+farm_w-1, cy+dy*2+dy*ddy*farm_h, cy+dy*(2+farm_h-1)+dy*ddy*farm_h, cz2)
                         r.misc[:users] = []
                         if dx == 0 and ddy == 0
@@ -2498,9 +2614,23 @@ class DwarfAI
             # garbage dump
             # TODO ensure flat space, no pools/tree, ...
             r = Room.new(:garbagedump, nil, cx+5, cx+5, cy, cy, cz)
-            r.z2 = r.z1 += 1 until df.map_tile_at(r).shape_basic != :Wall
+            tile = spiral_search(df.map_tile_at(r)) { |t|
+                t = surface_tile_at(t) and
+                (t.x >= cx + 5 or
+                (t.z > cz + 2 and t.x > fx + 5)) and
+                map_tile_in_rock(t.offset(0, 0, -1)) and
+                map_tile_in_rock(t.offset(2, 0, -1)) and
+                t.shape_basic == :Floor and
+                t.offset(1, 0, 0).shape_basic == :Floor and
+                t.offset(2, 0, 0).shape_basic == :Floor and
+                (t.offset(1, 1, 0).shape_basic == :Floor or
+                t.offset(1, -1, 0).shape_basic == :Floor)
+            }
+            r.x1 = r.x2 = tile.x
+            r.y1 = r.y2 = tile.y
+            r.z2 = r.z1 = surface_tile_at(tile).z
             @rooms << r
-            r = Room.new(:garbagepit, nil, cx+6, cx+7, cy, cy, @rooms.last.z)
+            r = Room.new(:garbagepit, nil, @rooms.last.x + 1, @rooms.last.x + 2, @rooms.last.y, @rooms.last.y, @rooms.last.z)
             @rooms << r
 
             # infirmary
@@ -2587,6 +2717,7 @@ class DwarfAI
             }
 
             setup_blueprint_pastures
+            setup_blueprint_outdoor_farms(nrfarms * 2)
         end
 
         def setup_blueprint_cistern_fromsource(src, fx, fy, fz)
@@ -2657,7 +2788,7 @@ class DwarfAI
             @ai.debug "cistern: reserve/in (#{p1.x}, #{p1.y}, #{p1.z}), river (#{src.x}, #{src.y}, #{src.z})"
 
             # XXX hardcoded layout again
-            if src.x <= p1.x+16
+            if src.x <= p1.x
                 p = p1
                 r = reserve
             else
@@ -2674,8 +2805,8 @@ class DwarfAI
             up = find_corridor_tosurface(p)
             r.accesspath << up[0]
 
-            dst = up[-1].maptile2.offset(0, 0, -1)
-            dst = df.map_tile_at(dst.x, dst.y, src.z) if src.z < dst.z
+            dst = up[-1].maptile2.offset(0, 0, -2)
+            dst = df.map_tile_at(dst.x, dst.y, src.z - 1) if src.z <= dst.z
             move_river[dst]
 
             if (dst.x - src.x).abs > 1
@@ -2697,17 +2828,20 @@ class DwarfAI
             # TODO check that 'channel' is easily channelable (eg river in a hole)
 
             if (dst.x - out.x).abs > 1
-                cor = Corridor.new(dst.x+(out.x<=>dst.x), out.x, dst.y, dst.y, dst.z, dst.z)
+                cor = Corridor.new(dst.x - (dst.x <=> out.x), out.x - (out.x <=> dst.x), dst.y, dst.y, dst.z, dst.z)
                 @corridors << cor
                 r.accesspath << cor
                 r = cor
             end
 
             if (dst.y - out.y).abs > 1
-                cor = Corridor.new(out.x, out.x, dst.y+(out.y<=>dst.y), out.y, dst.z, dst.z)
+                cor = Corridor.new(out.x - (out.x <=> dst.x), out.x - (out.x <=> dst.x), dst.y + (out.y <=> dst.y), out.y, dst.z, dst.z)
                 @corridors << cor
                 r.accesspath << cor
             end
+
+            up = find_corridor_tosurface(df.map_tile_at(out.x, out.y, dst.z))
+            r.accesspath << up[0]
 
             reserve.misc[:channel_enable] = [channel.x, channel.y, channel.z] if channel
         end
@@ -2715,11 +2849,11 @@ class DwarfAI
         # scan for 11x11 flat areas with grass
         def setup_blueprint_pastures
             want = 36
-            @fort_entrance.maptile.spiral_search(df.world.map.x_count, 12, 12) { |_t|
+            @fort_entrance.maptile.spiral_search([df.world.map.x_count, df.world.map.y_count].max, 12, 12) { |_t|
                 next unless sf = surface_tile_at(_t)
                 grasstile = 0
                 if (-5..5).all? { |dx| (-5..5).all? { |dy|
-                    if tt = sf.offset(dx, dy) and tt.shape_basic == :Floor and
+                    if tt = sf.offset(dx, dy) and (tt.shape_basic == :Floor or tt.tilemat == :TREE) and
                             tt.designation.flow_size == 0 and tt.tilemat != :FROZEN_LIQUID
                         grasstile += 1 if tt.mapblock.block_events.find { |be|
                             be.kind_of?(DFHack::BlockSquareEventGrassst) and be.amount[tt.dx][tt.dy] > 0
@@ -2729,6 +2863,30 @@ class DwarfAI
                 } } and grasstile >= 70
                     @rooms << Room.new(:pasture, nil, sf.x-5, sf.x+5, sf.y-5, sf.y+5, sf.z)
                     @rooms.last.misc[:users] = []
+                    want -= 1
+                    true if want == 0
+                end
+            }
+        end
+
+        # scan for 3x3 flat areas with soil
+        def setup_blueprint_outdoor_farms(want)
+            @fort_entrance.maptile.spiral_search([df.world.map.x_count, df.world.map.y_count].max, 9, 3) { |_t|
+                next unless sf = surface_tile_at(_t)
+                sd = sf.designation
+                if (-1..1).all? { |dx| (-1..1).all? { |dy|
+                    tt = sf.offset(dx, dy) and
+                    td = tt.designation and
+                    ((sd.subterranean and td.subterranean) or
+                    (not sd.subterranean and not td.subterranean and
+                        sd.biome == td.biome)) and
+                    tt.shape_basic == :Floor and
+                    tt.designation.flow_size == 0 and
+                    [:GRASS_DARK, :GRASS_LIGHT, :SOIL].include?(tt.tilemat)
+                } }
+                    @rooms << Room.new(:farmplot, [:food, :cloth][want % 2], sf.x-1, sf.x+1, sf.y-1, sf.y+1, sf.z)
+                    @rooms.last.misc[:users] = []
+                    @rooms.last.misc[:outdoor] = true
                     want -= 1
                     true if want == 0
                 end
@@ -2834,10 +2992,71 @@ class DwarfAI
             }
         end
 
+        def setup_outdoor_gathering_zones
+            x = 0
+            y = 0
+            i = 0
+            ground = {}
+            bg = df.onupdate_register('df-ai plan setup_outdoor_gathering_zones', 10) do
+                bg.description = "df-ai plan setup_outdoor_gathering_zones #{i}"
+                if x+i == [x+31, df.world.map.x_count].min
+                    ground.keys.each do |tz|
+                        g = ground[tz]
+                        bld = df.building_alloc(:Civzone, :ActivityZone)
+                        bld.zone_flags.active = true
+                        bld.zone_flags.gather = true
+                        bld.gather_flags.pick_trees = true
+                        bld.gather_flags.pick_shrubs = true
+                        bld.gather_flags.gather_fallen = true
+                        w = 31
+                        h = 31
+                        w = df.world.map.x_count % 31 if x + 31 > df.world.map.x_count
+                        h = df.world.map.y_count % 31 if y + 31 > df.world.map.y_count
+                        df.building_position(bld, [x, y, tz], w, h)
+                        bld.room.extents = df.malloc(w * h)
+                        bld.room.x = x
+                        bld.room.y = y
+                        bld.room.width = w
+                        bld.room.height = h
+                        w.times do |cx|
+                            h.times do |cy|
+                                bld.room.extents[cx + w * cy] = g[[cx, cy]] ? 1 : 0
+                            end
+                        end
+                        bld.is_room = 1
+                        df.building_construct_abstract(bld)
+                    end
+
+                    ground.clear
+                    i = 0
+                    x += 31
+                    if x >= df.world.map.x_count
+                        x = 0
+                        y += 31
+                        if y >= df.world.map.y_count
+                            df.onupdate_unregister(bg)
+                            @ai.debug 'plan setup_outdoor_gathering_zones finished'
+                            next
+                        end
+                    end
+                    next
+                end
+
+                tx = x + i
+                (y...([y+31, df.world.map.y_count].min)).each do |ty|
+                    next unless t = surface_tile_at(tx, ty, true)
+                    tz = t.z
+                    ground[tz] ||= {}
+                    ground[tz][[tx % 31, ty % 31]] = true
+                end
+                i += 1
+            end
+        end
+
         # check that tile is surrounded by solid rock/soil walls
         def map_tile_in_rock(tile)
-            (-1..1).all? { |dx| (-1..1).all? { |dy|
-                t = tile.offset(dx, dy) and t.shape_basic == :Wall and tm = t.tilemat and (tm == :STONE or tm == :MINERAL or tm == :SOIL)
+            tile and (-1..1).all? { |dx| (-1..1).all? { |dy|
+                t = tile.offset(dx, dy) and t.shape_basic == :Wall and tm = t.tilemat and (tm == :STONE or tm == :MINERAL or tm == :SOIL or tm == :ROOT)
             } }
         end
 
@@ -2849,7 +3068,7 @@ class DwarfAI
                 if !t.designation.hidden
                     t.designation.flow_size < 4 and tm != :FROZEN_LIQUID
                 else
-                    t.shape_basic == :Wall and (tm == :STONE or tm == :MINERAL or tm == :SOIL)
+                    t.shape_basic == :Wall and (tm == :STONE or tm == :MINERAL or tm == :SOIL or tm == :ROOT)
                 end
             } }
         end
@@ -2864,10 +3083,10 @@ class DwarfAI
             cor1.z2 += 1 while map_tile_in_rock(cor1.maptile2)
 
             if out = cor1.maptile2 and ((out.shape_basic != :Ramp and out.shape_basic != :Floor) or
-                                        out.shape == :TREE or out.designation.flow_size != 0)
+                                        out.tilemat == :TREE or out.tilemat == :RAMP or out.designation.flow_size != 0)
                 out2 = spiral_search(out) { |t|
                     t = t.offset(0, 0, 1) while map_tile_in_rock(t)
-                    ((t.shape_basic == :Ramp or t.shape_basic == :Floor) and t.shape != :TREE and t.designation.flow_size == 0)
+                    ((t.shape_basic == :Ramp or t.shape_basic == :Floor) and t.tilemat != :TREE and t.designation.flow_size == 0)
                 }
 
                 if out.designation.flow_size > 0
@@ -2904,7 +3123,7 @@ class DwarfAI
 
         end
 
-        def surface_tile_at(t, ty=nil)
+        def surface_tile_at(t, ty=nil, allow_trees=false)
             @rangez ||= (0...df.world.map.z_count).to_a.reverse
 
             if ty
@@ -2913,9 +3132,28 @@ class DwarfAI
                 tx, ty = t.x, t.y 
             end
 
-            if sz = @rangez.find { |z| tt = df.map_tile_at(tx, ty, z) and tsb = tt.shape_basic and (tsb == :Floor or tsb == :Ramp) }
-                df.map_tile_at(tx, ty, sz)
+            dx, dy = tx & 15, ty & 15
+
+            tree = false
+            @rangez.each do |z|
+                next unless b = df.map_block_at(tx, ty, z)
+                next unless tt = b.tiletype[dx][dy]
+                next unless ts = DFHack::Tiletype::Shape[tt]
+                next unless tsb = DFHack::TiletypeShape::BasicShape[ts]
+                next if tsb == :Open
+                next unless tm = DFHack::Tiletype::Material[tt]
+                return if tm == :POOL or tm == :RIVER
+                if tsb == :Floor or tsb == :Ramp
+                    return df.map_tile_at(tx, ty, z) if tm != :TREE
+                end
+                if tm == :TREE
+                    tree = true
+                elsif tree
+                    return df.map_tile_at(tx, ty, z + 1) if allow_trees
+                    return
+                end
             end
+            return
         end
 
         def status
@@ -2946,6 +3184,22 @@ class DwarfAI
                     @room_category[type].to_a.first
                 end
             end
+        end
+
+        def serialize
+            {
+                :rooms     => @rooms.map(&:serialize),
+                :corridors => @corridors.map(&:serialize),
+                :tasks     => @tasks.map{ |t| t.map{ |v|
+                    if i = $dwarfAI.plan.instance_variable_get(:@rooms).index(v) # XXX
+                        [:room, i]
+                    elsif i = $dwarfAI.plan.instance_variable_get(:@corridors).index(v) # XXX
+                        [:corridor, i]
+                    else
+                        v
+                    end
+                } },
+            }
         end
 
         class Corridor
@@ -2983,9 +3237,12 @@ class DwarfAI
                     if t = df.map_tile_at(x, y, z)
                         next if t.tilemat == :CONSTRUCTION
                         dm = mode || dig_mode(t.x, t.y, t.z)
-                        dm = :Default if dm != :No and t.shape == :TREE
+                        if dm != :No and t.tilemat == :TREE
+                            dm = :Default
+                            t = find_tree_base t
+                        end
                         t.dig dm if ((dm == :DownStair or dm == :Channel) and t.shape != :STAIR_DOWN and t.shape_basic != :Open) or
-                                t.shape == :WALL or t.shape == :TREE
+                                t.shape == :WALL
                     end
                 } } }
                 return if plandig
@@ -2996,10 +3253,30 @@ class DwarfAI
                             t.dig f[:dig] if t.shape_basic == :Wall or (f[:dig] == :Channel and t.shape_basic != :Open)
                         else
                             dm = dig_mode(t.x, t.y, t.z)
-                            t.dig dm if (dm == :DownStair and t.shape != :STAIR_DOWN) or t.shape == :WALL or t.shape == :TREE
+                            t.dig dm if (dm == :DownStair and t.shape != :STAIR_DOWN) or t.shape == :WALL
                         end
                     end
                 }
+            end
+
+            def find_tree_base(t)
+                tree = (df.world.plants.tree_dry.to_a | df.world.plants.tree_wet.to_a).find { |tree|
+                    next true if tree.pos.x == t.x and tree.pos.y == t.y and tree.pos.z == t.z
+                    next unless tree.tree_info and tree.tree_info.body
+                    sx = tree.pos.x - tree.tree_info.dim_x / 2
+                    sy = tree.pos.y - tree.tree_info.dim_y / 2
+                    sz = tree.pos.z
+                    next if t.x < sx or t.y < sy or t.z < sz or t.x >= sx + tree.tree_info.dim_x or t.y >= sy + tree.tree_info.dim_y or t.z >= sz + tree.tree_info.body_height
+                    next unless tree.tree_info.body[(t.z - sz)]
+                    tile = tree.tree_info.body[(t.z - sz)][(t.x - sz) + tree.tree_info.dim_x * (t.y - sy)]
+                    tile._whole != 0 and not tile.blocked
+                }
+                if tree
+                    df.map_tile_at(tree)
+                else
+                    puts_err "AI: #{df.cur_year}:#{df.cur_year_tick} failed to find tree at #{t.inspect}"
+                    t
+                end
             end
 
             def dig_mode(x, y, z)
@@ -3048,6 +3325,38 @@ class DwarfAI
                     return if t.shape_basic == :Open
                 }
             end
+
+            def serialize
+                {
+                    :x1         => x1,
+                    :x2         => x2,
+                    :y1         => y1,
+                    :y2         => y2,
+                    :z1         => z1,
+                    :z2         => z2,
+                    :accesspath => accesspath.map{ |ap|
+                        if i = $dwarfAI.plan.instance_variable_get(:@rooms).index(ap) # XXX
+                            [:room, i]
+                        elsif i = $dwarfAI.plan.instance_variable_get(:@corridors).index(ap) # XXX
+                            [:corridor, i]
+                        else
+                            raise "access path #{ap.inspect} not in @rooms or @corridors"
+                        end
+                    },
+                    :status     => status,
+                    :layout     => layout,
+                    :type       => type,
+                    :owner      => owner,
+                    :subtype    => subtype,
+                    :misc       => Hash[misc.map{ |k, v|
+                        if k == :workshop
+                            [k, $dwarfAI.plan.instance_variable_get(:@rooms).index(v)] # XXX
+                        else
+                            [k, v]
+                        end
+                    }],
+                }
+            end
         end
 
         class Room < Corridor
@@ -3063,3 +3372,5 @@ class DwarfAI
         end
     end
 end
+
+# vim: et:sw=4:ts=4

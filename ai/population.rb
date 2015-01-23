@@ -1,15 +1,17 @@
 class DwarfAI
     class Population
         class Citizen
-            attr_accessor :id, :role, :idlecounter, :entitypos
+            attr_accessor :id
             def initialize(id)
                 @id = id
-                @idlecounter = 0
-                @entitypos = []
             end
 
             def dfunit
                 df.unit_find(@id)
+            end
+
+            def serialize
+                id
             end
         end
 
@@ -20,6 +22,7 @@ class DwarfAI
             @ai = ai
             @citizen = {}
             @military = {}
+            @idlers = []
             @pet = {}
             @update_counter = 0
         end
@@ -46,6 +49,7 @@ class DwarfAI
             when 4; update_military
             when 5; update_pets
             when 6; update_deads
+            when 7; update_caged
             end
             @onupdate_handle.description = "df-ai pop"
 
@@ -78,7 +82,6 @@ class DwarfAI
             df.unit_citizens.each { |u|
                 next if u.profession == :BABY
                 @citizen[u.id] ||= new_citizen(u.id)
-                @citizen[u.id].entitypos = df.unit_entitypositions(u)
                 old.delete u.id
             }
 
@@ -96,7 +99,43 @@ class DwarfAI
         end
 
         def update_deads
-            # TODO engrave slabs for ghosts
+            df.world.units.all.each { |u|
+                ai.stocks.queue_slab(u.hist_figure_id) if u.flags3.ghostly and not u.flags1.dead
+            }
+        end
+
+        def update_caged
+            count = 0
+            df.world.items.other[:CAGE].each do |cage|
+                next if not cage.flags.on_ground
+                cage.general_refs.each do |ref|
+                    case ref
+                    when DFHack::GeneralRefContainsItemst
+                        next if ref.item_tg.flags.dump
+                        count += 1
+                        ref.item_tg.flags.dump = true
+
+                    when DFHack::GeneralRefContainsUnitst
+                        u = ref.unit_tg
+
+                        if df.ui.main.fortress_entity.histfig_ids.include?(u.hist_figure_id)
+                            # TODO rescue caged dwarves
+                        else
+                            u.inventory.each do |it|
+                                next if it.item.flags.dump
+                                count += 1
+                                it.item.flags.dump = true
+                            end
+
+                            if u.inventory.empty? and r = ai.plan.find_room(:pitcage) { |_r| _r.dfbuilding } and ai.plan.spiral_search(r.maptile, 1, 1) { |t| df.same_pos?(t, cage) }
+                                assign_unit_to_zone(u, r.dfbuilding)
+                                @ai.debug "pop: marked #{u.name || 'unnamed'} #{u.race_tg.name[0]} for pitting"
+                            end
+                        end
+                    end
+                end
+            end
+            @ai.debug "pop: dumped #{count} items from cages" if count > 0
         end
 
         def update_military
@@ -139,6 +178,7 @@ class DwarfAI
                     sc.orders.each { |so|
                         next unless so.order.kind_of?(DFHack::SquadOrderTrainst)
                         so.min_count = (soldier_count > 3 ? soldier_count-1 : soldier_count)
+                        so.min_count = 0 if r = ai.plan.find_room(:barracks) { |_r| _r.misc[:squad_id] == sq.id } and r.status != :finished
                     }
                 }
             }
@@ -148,13 +188,13 @@ class DwarfAI
         def military_find_commander_or_captain_pos(commander)
             if commander
                 df.world.entities.all.binsearch(df.ui.civ_id).entity_raw.positions.each do |a|
-                    if a.responsibilities[:MILITARY_STRATEGY] and a.flags[:SITE]=true
+                    if a.responsibilities[:MILITARY_STRATEGY] and a.flags[:SITE]
                         return a.code
                     end
                 end
             else
                 df.world.entities.all.binsearch(df.ui.civ_id).entity_raw.positions.each do |a|
-                    if a.flags[:MILITARY_SCREEN_ONLY] and a.flags[:SITE]=true
+                    if a.flags[:MILITARY_SCREEN_ONLY] and a.flags[:SITE]
                         return a.code
                     end
                 end                
@@ -223,10 +263,9 @@ class DwarfAI
                     pos = DFHack::SquadPosition.cpp_new
                     [:Body, :Head, :Pants, :Gloves, :Shoes, :Shield, :Weapon].each { |t|
                         pos.uniform[t] << DFHack::SquadUniformSpec.cpp_new(:color => -1,
-                                :item_filter => {:item_type => item_type[t], :material_class => :Metal2,
+                                :item_filter => {:item_type => item_type[t], :material_class => :Armor,
                                     :mattype => -1, :matindex => -1})
                     }
-                    pos.uniform[:Weapon][0].indiv_choice.melee = true
                     pos.uniform[:Weapon][0].item_filter.material_class = :None
                     pos.flags.exact_matches = true
                     pos.unk_118 = pos.unk_11c = -1
@@ -236,12 +275,29 @@ class DwarfAI
                 if df.ui.main.fortress_entity.squads.length % 3 == 2
                     # ranged squad
                     squad.positions.each { |pos|
-                        pos.uniform[:Weapon][0].indiv_choice.melee = false
                         pos.uniform[:Weapon][0].indiv_choice.ranged = true
                     }
                     squad.ammunition << DFHack::SquadAmmoSpec.cpp_new(:item_filter => { :item_type => :AMMO,
                                         :item_subtype => 0, :material_class => :None}, # subtype = bolts
-                                :amount => 100, :flags => { :use_combat => true, :use_training => true })
+                                :amount => 500, :flags => { :use_combat => true, :use_training => true })
+                else
+                    # we don't want all the axes being used up by the military.
+                    weapons = df.ui.main.fortress_entity.entity_raw.equipment.weapon_tg.find_all { |idef|
+                        next if idef.skill_melee == :MINING
+                        next if idef.skill_melee == :AXE
+                        next if idef.skill_ranged != :NONE
+                        next if idef.flags[:TRAINING]
+                        true
+                    }
+                    if weapons.empty?
+                        squad.positions.each { |pos|
+                            pos.uniform[:Weapon][0].indiv_choice.melee = true
+                        }
+                    else
+                        squad.positions.each { |pos|
+                            pos.uniform[:Weapon][0].item_filter.item_subtype = weapons[rand(weapons.length)].subtype
+                        }
+                    end
                 end
 
                 # schedule
@@ -276,60 +332,97 @@ class DwarfAI
         LaborList = DFHack::UnitLabor::ENUM.sort.transpose[1] - [:NONE]
         LaborTool = { :MINE => true, :CUTWOOD => true, :HUNT => true }
         LaborSkill = DFHack::JobSkill::Labor.invert
-
-        LaborMin = Hash.new(2).update :DETAIL => 4, :PLANT => 4
-        LaborMax = Hash.new(8).update :FISH => 0
-        LaborMinPct = Hash.new(10).update :DETAIL => 20, :PLANT => 30, :FISH => 1
-        LaborMaxPct = Hash.new(00).update :DETAIL => 40, :PLANT => 60, :FISH => 3
+        LaborIdle = { :PLANT => true, :HERBALISM => true, :FISH => true, :DETAIL => true }
+        LaborMedical = { :DIAGNOSE => true, :SURGERY => true, :BONE_SETTING => true, :SUTURING => true, :DRESSING_WOUNDS => true, :FEED_WATER_CIVILIANS => true }
+        LaborHauling = { :FEED_WATER_CIVILIANS => true, :RECOVER_WOUNDED => true }
         LaborList.each { |lb|
             if lb.to_s =~ /HAUL/
-                LaborMinPct[lb] = 30
-                LaborMaxPct[lb] = 60
+                LaborHauling[lb] = true
             end
         }
-        LaborWontWorkJob = { :AttendParty => true, :Rest => true,
-            :UpdateStockpileRecords => true }
+
+        LaborMin = Hash.new(2).update :DETAIL => 4, :PLANT => 4, :HERBALISM => 1
+        LaborMax = Hash.new(8).update :FISH => 1
+        LaborMinPct = Hash.new(0).update :DETAIL => 5, :PLANT => 30, :FISH => 1, :HERBALISM => 10
+        LaborMaxPct = Hash.new(0).update :DETAIL => 20, :PLANT => 60, :FISH => 10, :HERBALISM => 30
+        LaborHauling.keys.each { |lb|
+            LaborMinPct[lb] = 30
+            LaborMaxPct[lb] = 100
+        }
+        LaborWontWorkJob = { :AttendParty => true, :Rest => true, :UpdateStockpileRecords => true }
 
         def autolabors(step)
             case step
-            when 2
+            when 1
                 @workers = []
                 @idlers = []
                 @labor_needmore = Hash.new(0)
                 nonworkers = []
+                @medic = {}
+                df.ui.main.fortress_entity.assignments_by_type[:HEALTH_MANAGEMENT].each { |n|
+                    next unless hf = df.world.history.figures.binsearch(n.histfig)
+                    @medic[hf.unit_id] = true
+                }
+
+                merchant = df.world.units.all.any? { |u|
+                    u.flags1.merchant and not u.flags1.dead
+                }
+
+                set_up_trading(merchant)
 
                 citizen.each_value { |c|
                     next if not u = c.dfunit
-                    if u.mood == :None and
-                            u.profession != :CHILD and
-                            u.profession != :BABY and
-                            !unit_hasmilitaryduty(u) and
-                            !unit_shallnotworknow(u) and
-                            (!u.job.current_job or !LaborWontWorkJob[u.job.current_job.job_type]) and
-                            not u.status.misc_traits.find { |mt| mt.id == :OnBreak } and
-                            not u.specific_refs.find { |sr| sr.type == :ACTIVITY }
-                            # TODO filter nobles that will not work
+                    if u.mood != :None
+                        nonworkers << [c, 'has strange mood']
+                    elsif u.profession == :CHILD
+                        nonworkers << [c, 'is a child', true]
+                    elsif u.profession == :BABY
+                        nonworkers << [c, 'is a baby', true]
+                    elsif unit_hasmilitaryduty(u)
+                        nonworkers << [c, 'has military duty']
+                    elsif u.flags1.caged
+                        nonworkers << [c, 'caged']
+                    elsif @citizen.length >= 20 and
+                        df.world.manager_orders.last and
+                        df.world.manager_orders.last.is_validated == 0 and
+                        df.unit_entitypositions(u).find { |n| n.responsibilities[:MANAGE_PRODUCTION] }
+                        nonworkers << [c, 'validating work orders']
+                    elsif merchant and df.unit_entitypositions(u).find { |n| n.responsibilities[:TRADE] }
+                        nonworkers << [c, 'trading']
+                    elsif u.job.current_job and LaborWontWorkJob[u.job.current_job.job_type]
+                        nonworkers << [c, DFHack::JobType::Caption[u.job.current_job.job_type]]
+                    elsif u.status.misc_traits.find { |mt| mt.id == :OnBreak }
+                        nonworkers << [c, 'on break']
+                    elsif u.specific_refs.find { |sr| sr.type == :ACTIVITY }
+                        nonworkers << [c, 'has activity']
+                    else
+                        # TODO filter nobles that will not work
                         @workers << c
                         @idlers << c if not u.job.current_job
-                    else
-                        nonworkers << c
                     end
                 }
 
                 # free non-workers
                 nonworkers.each { |c|
-                    u = c.dfunit
+                    u = c[0].dfunit
                     ul = u.status.labors
                     LaborList.each { |lb|
-                        if ul[lb]
-                            # disable everything (may wait meeting)
+                        if LaborHauling[lb]
+                            if not ul[lb] and not c[2]
+                                ul[lb] = true
+                                u.military.pickup_flags.update = true if LaborTool[lb]
+                                @ai.debug "assigning labor #{lb} to #{u.name} (non-worker: #{c[1]})"
+                            end
+                        elsif ul[lb]
+                            next if LaborMedical[lb] and @medic[u.id]
                             ul[lb] = false
-                            # free pick/axe/crossbow  XXX does it work?
                             u.military.pickup_flags.update = true if LaborTool[lb]
+                            @ai.debug "unassigning labor #{lb} from #{u.name} (non-worker: #{c[1]})"
                         end
                     }
                 }
 
+            when 2
                 seen_workshop = {}
                 df.world.job_list.each { |job|
                     ref_bld = job.general_refs.grep(DFHack::GeneralRefBuildingHolderst).first
@@ -346,7 +439,7 @@ class DwarfAI
                             case job.job_type
                             when :ConstructBuilding, :DestroyBuilding
                                 # TODO
-                            when :PullLever
+                                @labor_needmore[:UNKNOWN_BUILDING_LABOR_PLACEHOLDER] += 1
                             when :CustomReaction
                                 reac = df.world.raws.reactions.find { |r| r.code == job.reaction_name }
                                 if reac and job_labor = DFHack::JobSkill::Labor[reac.skill]
@@ -357,7 +450,9 @@ class DwarfAI
                             when :StoreItemInStockpile, :StoreItemInBag, :StoreItemInHospital,
                                     :StoreItemInChest, :StoreItemInCabinet, :StoreWeapon,
                                     :StoreArmor, :StoreItemInBarrel, :StoreItemInBin, :StoreItemInVehicle
-                                @labor_needmore[:HAUL_ITEM] += 1
+                                LaborHauling.keys.each { |lb|
+                                    @labor_needmore[lb] += 1
+                                }
                             else
                                 if job.material_category.wood
                                     @labor_needmore[:CARPENTER] += 1
@@ -365,10 +460,12 @@ class DwarfAI
                                     @labor_needmore[:BONE_CARVE] += 1
                                 elsif job.material_category.cloth
                                     @labor_needmore[:CLOTHESMAKER] += 1
+                                elsif job.material_category.leather
+                                    @labor_needmore[:LEATHER] += 1
                                 elsif job.mat_type == 0
                                     # XXX metalcraft ?
                                     @labor_needmore[:MASON] += 1
-                                elsif $DEBUG
+                                else
                                     @seen_badwork ||= {}
                                     @ai.debug "unknown labor for #{job.job_type} #{job.inspect}" if not @seen_badwork[job.job_type]
                                     @seen_badwork[job.job_type] = true
@@ -379,13 +476,12 @@ class DwarfAI
 
                     if ref_bld
                         case ref_bld.building_tg
-                        when DFHack::BuildingFarmplotst
+                        when DFHack::BuildingFarmplotst, DFHack::BuildingStockpilest
                             # parallel work allowed
                         else
                             seen_workshop[ref_bld.building_id] = true
                         end
                     end
-
                 }
 
             when 3
@@ -402,22 +498,27 @@ class DwarfAI
                     }
                 }
 
-                # if one has too many labors, free him up (one per round)
-                lim = 4*LaborList.length/[@workers.length, 1].max
-                lim = 4 if lim < 4
-                if cid = @worker_labor.keys.find { |id| @worker_labor[id].length > lim }
-                    c = citizen[cid]
-                    u = c.dfunit
-                    ul = u.status.labors
+                if @workers.length > 15
+                    # if one has too many labors, free him up (one per round)
+                    lim = 4*LaborList.length/[@workers.length, 1].max
+                    lim = 4 if lim < 4
+                    lim += LaborHauling.length
+                    if cid = @worker_labor.keys.find { |id| @worker_labor[id].length > lim }
+                        c = citizen[cid]
+                        u = c.dfunit
+                        ul = u.status.labors
 
-                    LaborList.each { |lb|
-                        if ul[lb]
-                            @worker_labor[c.id].delete lb
-                            @labor_worker[lb].delete c.id
-                            ul[lb] = false
-                            u.military.pickup_flags.update = true if LaborTool[lb]
-                        end
-                    }
+                        LaborList.each { |lb|
+                            if ul[lb]
+                                next if LaborMedical[lb] and @medic[u.id]
+                                @worker_labor[c.id].delete lb
+                                @labor_worker[lb].delete c.id
+                                ul[lb] = false
+                                u.military.pickup_flags.update = true if LaborTool[lb]
+                            end
+                        }
+                        @ai.debug "unassigned all labors from #{u.name} (too many labors)"
+                    end
                 end
 
             when 4
@@ -425,6 +526,19 @@ class DwarfAI
                 labormax = LaborMax
                 laborminpct = LaborMinPct
                 labormaxpct = LaborMaxPct
+
+                LaborList.each { |lb|
+                    max = labormax[lb]
+                    maxpc = labormaxpct[lb] * @workers.length / 100
+                    max = maxpc if maxpc > max
+
+                    @labor_needmore.delete lb if @labor_worker[lb].length >= max
+                }
+
+                if @labor_needmore.empty? and not @idlers.empty? and @ai.plan.past_initial_phase and (not @last_idle_year or @last_idle_year != df.cur_year)
+                    @ai.plan.idleidle
+                    @last_idle_year = df.cur_year
+                end
 
                 # handle low-number of workers + tool labors
                 mintool = LaborTool.keys.inject(0) { |s, lb| 
@@ -460,11 +574,13 @@ class DwarfAI
                 # list of dwarves with an exclusive labor
                 exclusive = {}
                 [
-                    [:CARPENTER, lambda { r = ai.plan.find_room(:workshop) { |_r| _r.subtype == :Carpenters and _r.dfbuilding } and not r.dfbuilding.jobs.empty? }],
+                    [:CARPENTER, lambda { ai.plan.find_room(:workshop) { |r| r.subtype == :Carpenters and r.dfbuilding and not r.dfbuilding.jobs.empty? } }],
                     [:MINE, lambda { ai.plan.digging? }],
-                    [:MASON, lambda { r = ai.plan.find_room(:workshop) { |_r| _r.subtype == :Masons and _r.dfbuilding } and not r.dfbuilding.jobs.empty? }],
+                    [:MASON, lambda { ai.plan.find_room(:workshop) { |r| r.subtype == :Masons and r.dfbuilding and not r.dfbuilding.jobs.empty? } }],
+                    [:CUTWOOD, lambda { ai.stocks.cutting_trees? }],
+                    [:DETAIL, lambda { r = ai.plan.find_room(:cistern) { |_r| _r.subtype == :well } and not r.misc[:channeled] }],
                 ].each { |lb, test|
-                    if @workers.length > exclusive.length+2 and test[]
+                    if @workers.length > exclusive.length+2 and @labor_needmore[lb] > 0 and test[]
                         # keep last run's choice
                         cid = @labor_worker[lb].sort_by { |i| @worker_labor[i].length }.first
                         next if not cid
@@ -473,7 +589,8 @@ class DwarfAI
                         c = citizen[cid]
                         @worker_labor[cid].dup.each { |llb|
                             next if llb == lb
-                            autolabor_unsetlabor(c, llb)
+                            next if LaborTool[llb]
+                            autolabor_unsetlabor(c, llb, "has exclusive labor: #{lb}")
                         }
                     end
                 }
@@ -486,11 +603,14 @@ class DwarfAI
                     maxpc = labormaxpct[lb] * @workers.length / 100
                     min = minpc if minpc > min
                     max = maxpc if maxpc > max
+                    max = @workers.length if @labor_needmore.empty? and LaborIdle[lb]
+                    max = 0 if lb == :FISH and fishery = ai.plan.find_room(:workshop) { |_r| _r.subtype == :Fishery } and fishery.status == :plan
                     min = max if min > max
                     min = @workers.length if min > @workers.length
 
                     cnt = @labor_worker[lb].length
                     if cnt > max
+                        next if @labor_needmore.empty?
                         sk = LaborSkill[lb]
                         @labor_worker[lb] = @labor_worker[lb].sort_by { |_cid|
                             if sk
@@ -505,7 +625,7 @@ class DwarfAI
                         }
                         (cnt-max).times {
                             cid = @labor_worker[lb].shift
-                            autolabor_unsetlabor(citizen[cid], lb)
+                            autolabor_unsetlabor(citizen[cid], lb, 'too many dwarves')
                         }
 
                     elsif cnt < min
@@ -513,7 +633,7 @@ class DwarfAI
                         (min-cnt).times {
                             c = @workers.sort_by { |_c|
                                 malus = @worker_labor[_c.id].length * 10
-                                malus += _c.entitypos.length * 40
+                                malus += df.unit_entitypositions(_c.dfunit).length * 40
                                 if sk = LaborSkill[lb] and usk = _c.dfunit.status.current_soul.skills.find { |_usk| _usk.id == sk }
                                     malus -= DFHack::SkillRating.int(usk.rating) * 4    # legendary => 15
                                 end
@@ -522,23 +642,25 @@ class DwarfAI
                                 next if exclusive[_c.id]
                                 next if LaborTool[lb] and @worker_labor[_c.id].find { |_lb| LaborTool[_lb] }
                                 not @worker_labor[_c.id].include?(lb)
-                            } || @workers.find { |_c| not exclusive[_c.id] and not @worker_labor[_c.id].include?(lb) }
+                            }
 
-                            autolabor_setlabor(c, lb)
+                            autolabor_setlabor(c, lb, 'not enough dwarves')
                         }
 
                     elsif not @idlers.empty?
-                        @labor_needmore[lb].times {
+                        more, desc = @labor_needmore[lb], 'idle'
+                        more, desc = max - cnt, 'idleidle' if @labor_needmore.empty?
+                        more.times do
                             break if @labor_worker[lb].length >= max
                             c = @idlers[rand(@idlers.length)]
-                            autolabor_setlabor(c, lb)
-                        }
+                            autolabor_setlabor(c, lb, desc)
+                        end
                     end
                 }
             end
         end
 
-        def autolabor_setlabor(c, lb)
+        def autolabor_setlabor(c, lb, reason='no reason given')
             return if not c
             return if @worker_labor[c.id].include?(lb)
             @labor_worker[lb] << c.id
@@ -546,32 +668,42 @@ class DwarfAI
             u = c.dfunit
             if LaborTool[lb]
                 LaborTool.keys.each { |_lb| u.status.labors[_lb] = false }
-                u.military.pickup_flags.update = true
             end
             u.status.labors[lb] = true
+            u.military.pickup_flags.update = true if LaborTool[lb]
+            @ai.debug "assigning labor #{lb} to #{u.name} (#{reason})"
         end
 
-        def autolabor_unsetlabor(c, lb)
+        def autolabor_unsetlabor(c, lb, reason='no reason given')
             return if not c
+            return if not @worker_labor[c.id].include?(lb)
+            u = c.dfunit
+            return if LaborMedical[lb] and @medic[u.id]
             @labor_worker[lb].delete c.id
             @worker_labor[c.id].delete lb
-            u = c.dfunit
             u.status.labors[lb] = false
             u.military.pickup_flags.update = true if LaborTool[lb]
+            @ai.debug "unassigning labor #{lb} from #{u.name} (#{reason})"
+        end
+
+        def set_up_trading(should_be_trading)
+            return unless r = ai.plan.find_room(:workshop) { |_r| _r.subtype == :TradeDepot }
+            return unless bld = r.dfbuilding
+            return if bld.trade_flags.trader_requested == should_be_trading
+            return unless view = df.curview and view._raw_rtti_classname == 'viewscreen_dwarfmodest'
+
+            view.feed_keys(:D_BUILDJOB)
+            df.center_viewscreen(r)
+            view.feed_keys(:CURSOR_LEFT)
+            view.feed_keys(:BUILDJOB_DEPOT_REQUEST_TRADER)
+            view.feed_keys(:LEAVESCREEN)
         end
 
         def unit_hasmilitaryduty(u)
             return if u.military.squad_id == -1
             squad = df.world.squads.all.binsearch(u.military.squad_id)
             curmonth = squad.schedule[squad.cur_alert_idx][df.cur_year_tick / (1200*28)]
-            !curmonth.orders.empty?
-        end
-
-        def unit_shallnotworknow(u)
-            # manager shall not work when unvalidated jobs are pending
-            return true if df.world.manager_orders.last and df.world.manager_orders.last.is_validated == 0 and
-                    df.unit_entitypositions(u).find { |n| n.responsibilities[:MANAGE_PRODUCTION] }
-            # TODO medical dwarf, broker
+            !curmonth.orders.empty? and !(curmonth.orders.length == 1 and curmonth.orders[0].min_count == 0)
         end
 
         def unit_totalxp(u)
@@ -618,9 +750,9 @@ class DwarfAI
             elsif ass = ent.assignments_by_type[:HEALTH_MANAGEMENT].first and hf = df.world.history.figures.binsearch(ass.histfig) and doc = df.unit_find(hf.unit_id)
                 # doc => healthcare
                 LaborList.each { |lb|
-                    doc.status.labors[lb] = case lb
+                    case lb
                     when :DIAGNOSE, :SURGERY, :BONE_SETTING, :SUTURING, :DRESSING_WOUNDS, :FEED_WATER_CIVILIANS
-                        true
+                        doc.status.labors[lb] = true
                     end
                 }
             end
@@ -688,7 +820,6 @@ class DwarfAI
                 next if u.race == df.ui.race_id
                 next if u.flags1.dead or u.flags1.merchant or u.flags1.forest
 
-begin
                 if @pet[u.id]
                     if @pet[u.id].include?(:MILKABLE) and u.profession != :BABY and u.profession != :CHILD
                         if not u.status.misc_traits.find { |mt| mt.id == :MilkCounter }
@@ -734,27 +865,6 @@ begin
                         u.flags2.slaughter = true
                     end
                 end
-
-                if cst.flags[:LAYS_EGGS]
-                    # TODO nest boxes
-                end
-
-                if cst.flags[:ADOPTS_OWNER]
-                    # keep only one
-                    oi = @pet.find_all { |i, t| t.include?(:ADOPTS_OWNER) }
-                    if oi.empty?
-                        @pet[u.id] << :ADOPTS_OWNER
-                    elsif u.caste != 0 and ou = df.unit_find(oi[0][0]) and ou.caste == 0 and !ou.flags2.slaughter
-                        # keep one male if possible
-                        @pet[u.id] << :ADOPTS_OWNER
-                        ou.flags2.slaughter = true
-                    else
-                        u.flags2.slaughter = true
-                    end
-                end
-rescue
-    # prevent errors with old dfhack (shearable_tissue / caste_tg)
-end
             }
 
             np.each_key { |id|
@@ -774,18 +884,28 @@ end
             # TODO remove existing chains/cages ?
             while ridx = u.general_refs.index { |ref| ref.kind_of?(DFHack::GeneralRefBuildingCivzoneAssignedst) }
                 ref = u.general_refs[ridx]
-                cidx = ref.building_tg.assigned_creature.index(u.id)
-                ref.building_tg.assigned_creature.delete_at(cidx)
+                cidx = ref.building_tg.assigned_units.index(u.id)
+                ref.building_tg.assigned_units.delete_at(cidx)
                 u.general_refs.delete_at(ridx)
                 df.free(ref._memaddr)
             end
 
             u.general_refs << DFHack::GeneralRefBuildingCivzoneAssignedst.cpp_new(:building_id => bld.id)
-            bld.assigned_creature << u.id
+            bld.assigned_units << u.id
         end
 
         def status
-            "#{@citizen.length} citizen, #{@pet.length} pets"
+            "#{@citizen.length} citizen, #{@military.length} military, #{@idlers.length} idle, #{@pet.length} pets"
+        end
+
+        def serialize
+            {
+                :citizen  => Hash[@citizen.map{ |k, v| [k, v.serialize] }],
+                :military => Hash[@military.map{ |k, v| [k, v.serialize] }],
+                :pet      => @pet,
+            }
         end
     end
 end
+
+# vim: et:sw=4:ts=4

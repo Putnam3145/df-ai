@@ -2,21 +2,27 @@ class DwarfAI
     attr_accessor :plan
     attr_accessor :pop
     attr_accessor :stocks
+    attr_accessor :camera
+    attr_accessor :random_embark
 
     def initialize
         @pop = Population.new(self)
         @plan = Plan.new(self)
         @stocks = Stocks.new(self)
+        @camera = Camera.new(self)
+        @random_embark = RandomEmbark.new(self)
     end
 
     def debug(str)
-	    puts "AI: #{df.cur_year}:#{df.cur_year_tick} #{str}" if $DEBUG
+        puts "AI: #{df.cur_year}:#{df.cur_year_tick} #{str}" if $DEBUG
     end
 
     def startup
         @pop.startup
         @plan.startup
         @stocks.startup
+        @camera.startup
+        @random_embark.startup
     end
 
     def handle_pause_event(announce)
@@ -38,7 +44,7 @@ class DwarfAI
         when :DIG_CANCEL_DAMP, :DIG_CANCEL_WARM; puts 'AI: lazy miners'
         when :BIRTH_CITIZEN; puts 'AI: newborn'
         when :BIRTH_ANIMAL
-        when :D_MIGRANTS_ARRIVAL, :D_MIGRANT_ARRIVAL, :MIGRANT_ARRIVAL, :NOBLE_ARRIVAL
+        when :D_MIGRANTS_ARRIVAL, :D_MIGRANT_ARRIVAL, :MIGRANT_ARRIVAL, :NOBLE_ARRIVAL, :FORT_POSITION_SUCCESSION
             puts 'AI: more minions'
         when :DIPLOMAT_ARRIVAL, :LIAISON_ARRIVAL, :CARAVAN_ARRIVAL, :TRADE_DIPLOMAT_ARRIVAL
             puts 'AI: visitors'
@@ -52,11 +58,19 @@ class DwarfAI
                 puts 'AI: an ambush!'
             else
                 puts "AI: unhandled pausing event #{announce.type.inspect} #{announce.inspect}"
-                return
+                #return
             end
         end
 
-        df.pause_state = false
+        if df.announcements.flags[announce.type].DO_MEGA
+            timeout_sameview {
+                df.curview.feed_keys(:CLOSE_MEGA_ANNOUNCEMENT)
+                df.pause_state = false
+            }
+        else
+            df.curview.feed_keys(:CLOSE_MEGA_ANNOUNCEMENT)
+            df.pause_state = false
+        end
     end
 
     def statechanged(st)
@@ -66,11 +80,14 @@ class DwarfAI
                     df.announcements.flags[a.type].PAUSE rescue nil
                 } and la.year == df.cur_year and la.time == df.cur_year_tick
             handle_pause_event(la)
-
+        elsif st == :PAUSED
+            df.curview.feed_keys(:CLOSE_MEGA_ANNOUNCEMENT)
+            df.pause_state = false
+            puts_err "AI: warning: pause without an event"
         elsif st == :VIEWSCREEN_CHANGED
             case cvname = df.curview._rtti_classname
             when :viewscreen_textviewerst
-                text = df.curview.text_display.map { |t|
+                text = df.curview.formatted_text.map { |t|
                     t.text.to_s.strip.gsub(/\s+/, ' ')
                 }.join(' ')
 
@@ -93,7 +110,7 @@ class DwarfAI
                     # dont unpause, to allow for 'die'
 
                 else
-                    puts "AI: paused in unknown textviewerst #{text.inspect}" if $DEBUG
+                    debug "AI: paused in unknown textviewerst #{text.inspect}"
                 end
 
             when :viewscreen_topicmeetingst
@@ -110,13 +127,13 @@ class DwarfAI
 
             else
                 @seen_cvname ||= { :viewscreen_dwarfmodest => true }
-                puts "AI: paused in unknown viewscreen #{cvname}" if not @seen_cvname[cvname] and $DEBUG
+                debug "AI: paused in unknown viewscreen #{cvname}" if not @seen_cvname[cvname]
                 @seen_cvname[cvname] = true
             end
         end
     end
 
-    def timeout_sameview(delay=8, &cb)
+    def timeout_sameview(delay=5, &cb)
         curscreen = df.curview._rtti_classname
         timeoff = Time.now + delay
 
@@ -134,6 +151,8 @@ class DwarfAI
         @pop.onupdate_register
         @plan.onupdate_register
         @stocks.onupdate_register
+        @camera.onupdate_register
+        @random_embark.onupdate_register
         @status_onupdate = df.onupdate_register('df-ai status', 3*28*1200, 3*28*1200) { puts status }
 
         df.onstatechange_register_once { |st|
@@ -150,6 +169,8 @@ class DwarfAI
     end
 
     def onupdate_unregister
+        @random_embark.onupdate_unregister
+        @camera.onupdate_unregister
         @stocks.onupdate_unregister
         @plan.onupdate_unregister
         @pop.onupdate_unregister
@@ -157,6 +178,17 @@ class DwarfAI
     end
 
     def status
-        ["Plan: #{plan.status}", "Pop: #{pop.status}", "Stocks: #{stocks.status}"]
+        ["Plan: #{plan.status}", "Pop: #{pop.status}", "Stocks: #{stocks.status}", "Camera: #{camera.status}"]
+    end
+
+    def serialize
+        {
+            :plan   => plan.serialize,
+            :pop    => pop.serialize,
+            :stocks => stocks.serialize,
+            :camera => camera.serialize,
+        }
     end
 end
+
+# vim: et:sw=4:ts=4

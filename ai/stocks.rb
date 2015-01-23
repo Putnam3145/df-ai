@@ -18,25 +18,27 @@ class DwarfAI
             :bag => 3, :table => 3, :chair => 3, :cage => 3,
             :coffin => 2, :coffin_bld => 3, :coffin_bld_pet => 1,
             :food => 20, :drink => 20, :wood => 16, :bucket => 2,
-            :pigtail_seeds => 10, :dimplecup_seeds => 10, :dimple_dye => 10,
+            :thread_seeds => 10, :dye_seeds => 10, :dye => 10,
             :weapon => 2, :armor => 2, :clothes => 2, :block => 6,
             :quiver => 2, :flask => 2, :backpack => 2, :wheelbarrow => 1,
             :splint => 1, :crutch => 1, :rope => 1, :weaponrack => 1,
             :armorstand => 1, :floodgate => 1, :traction_bench => 1,
             :soap => 1, :lye => 1, :ash => 1, :plasterpowder => 1,
-            :coal => 3, :raw_coke => 1, :gypsum => 1,
-            :giant_corkscrew => 1, :pipe_section => 1,
-            :quern => 1, :minecart => 1, :nestbox => 1, :hive => 1,
-            :jug => 1,
-            :leather => 0, :tallow => 0,
-            #:rock_noeco => 10,
+            :coal => 3, :raw_coke => 1, :gypsum => 1, :slab => 1,
+            :giant_corkscrew => 1, :pipe_section => 1, :anvil => 1,
+            :quern => 3, :minecart => 1, :nestbox => 1, :hive => 1,
+            :jug => 1, :stepladder => 2, :pick => 2, :axe => 2,
         }
         NeededPerDwarf = Hash.new(0.0).update :food => 1, :drink => 2
 
-        WatchStock = { :roughgem => 6, :pigtail => 10, :cloth_nodye => 10,
+        WatchStock = {
+            :roughgem => 6, :thread_plant => 10, :cloth_nodye => 10,
+            :mill_plant => 4, :bag_plant => 4, :milk => 1,
             :metal_ore => 6, :raw_coke => 2, :raw_adamantine => 2,
-            :quarrybush => 4, :skull => 2, :bone => 8, :leaves => 5,
-            :honeycomb => 1, :wool => 1,
+            :skull => 2, :bone => 8, :food_ingredients => 2,
+            :drink_plant => 5, :drink_fruit => 5, :honey => 1,
+            :honeycomb => 1, :wool => 1, :tallow => 1, :shell => 1,
+            :raw_fish => 1,
         }
 
         attr_accessor :ai, :count
@@ -50,9 +52,14 @@ class DwarfAI
             @updating = []
             @lastupdating = 0
             @count = {}
+            @farmplots = Hash.new(0)
+            @seeds = Hash.new(0)
+            @plants = Hash.new(0)
         end
 
         def startup
+            update_kitchen
+            update_plants
         end
 
         def onupdate_register
@@ -102,21 +109,172 @@ class DwarfAI
 
             @updating = Needed.keys | WatchStock.keys
             @updating_count = @updating.dup
+            @updating_seeds = true
+            @updating_plants = true
+            @updating_farmplots = []
+
+            ai.plan.find_room(:farmplot) { |r|
+                @updating_farmplots << r if r.dfbuilding
+                false # search all farm plots
+            }
+
             @ai.debug 'updating stocks'
 
             # do stocks accounting 'in the background' (ie one bit at a time)
             cb_bg = df.onupdate_register('df-ai stocks bg', 8) {
-                if key = @updating_count.shift
+                if @updating_seeds
+                    cb_bg.description = 'df-ai stocks bg count_seeds'
+                    count_seeds
+                elsif @updating_plants
+                    cb_bg.description = 'df-ai stocks bg count_plants'
+                    count_plants
+                elsif key = @updating_count.shift
                     cb_bg.description = "df-ai stocks bg count #{key}"
                     @count[key] = count_stocks(key)
                 elsif key = @updating.shift
                     cb_bg.description = "df-ai stocks bg act #{key}"
                     act(key)
+                elsif r = @updating_farmplots.shift
+                    cb_bg.description = "df-ai stocks bg farmplot #{r.subtype} #{ai.plan.rooms.index(r)}"
+                    farmplot(r, false)
                 else
                     # finished, dismiss callback
                     df.onupdate_unregister(cb_bg)
                 end
             }
+        end
+
+        def update_kitchen
+            # ban cooking alcohol
+            df.world.raws.plants.all.each do |p|
+                p.material.each do |m|
+                    ban_cooking("PLANT:#{p.id}:#{m.id}", :DRINK) if m.flags[:ALCOHOL]
+                end
+            end
+            df.world.raws.creatures.all.each do |c|
+                c.material.each do |m|
+                    ban_cooking("CREATURE:#{c.creature_id}:#{m.id}", :DRINK) if m.flags[:ALCOHOL]
+                end
+            end
+            # ban cooking tallow
+            df.world.raws.creatures.all.each do |c|
+                c.material.each do |m|
+                    ban_cooking("CREATURE:#{c.creature_id}:#{m.id}", :GLOB) if m.reaction_product and m.reaction_product.id and m.reaction_product.id[0] == 'SOAP_MAT'
+                end
+            end
+            # ban cooking honey (hard-coded in raws)
+            ban_cooking('CREATURE:HONEY_BEE:HONEY', :LIQUID_MISC)
+            # ban cooking plants that have seeds
+            df.world.raws.plants.all.each do |p|
+                m = df.decode_mat(p.material_defs.type_basic_mat, p.material_defs.idx_basic_mat).material
+                ban_cooking("PLANT:#{p.id}:#{p.material_defs.str_basic_mat[1]}", :PLANT) if m.reaction_product and m.reaction_product.id and m.reaction_product.id.include?('SEED_MAT')
+
+                if not p.flags[:TREE]
+                    p.growths.each do |g|
+                        m = df.decode_mat(g).material
+                        ban_cooking("PLANT:#{p.id}:#{m.id}", :PLANT_GROWTH) if m.reaction_product and m.reaction_product.id and m.reaction_product.id.include?('SEED_MAT')
+                    end
+                end
+            end
+        end
+
+        def update_plants
+            DrinkPlants.clear
+            DrinkFruits.clear
+            ThreadPlants.clear
+            MillPlants.clear
+            BagPlants.clear
+            DyePlants.clear
+            GrowPlants.clear
+            MilkCreatures.clear
+            df.world.raws.plants.all.length.times do |i|
+                p = df.world.raws.plants.all[i]
+                p.material.length.times do |j|
+                    if p.material[j].reaction_product.id.include?('DRINK_MAT')
+                        if p.material[j].flags[:STRUCTURAL_PLANT_MAT]
+                            DrinkPlants[i] = j + DFHack::MaterialInfo::PLANT_BASE
+                        elsif p.material[j].flags[:LEAF_MAT]
+                            DrinkFruits[i] = j + DFHack::MaterialInfo::PLANT_BASE
+                        end
+                        break
+                    end
+                end
+                ThreadPlants[i] = p.material_defs.type_basic_mat if p.flags[:THREAD]
+                MillPlants[i]   = p.material_defs.type_basic_mat if p.flags[:MILL]
+                BagPlants[i]    = p.material_defs.type_basic_mat if df.decode_mat(p.material_defs.type_basic_mat, p.material_defs.idx_basic_mat).material.reaction_product.id.include?('BAG_ITEM')
+                DyePlants[i]    = p.material_defs.type_mill      if p.flags[:MILL] and df.decode_mat(p.material_defs.type_mill, p.material_defs.idx_mill).material.flags[:IS_DYE]
+                GrowPlants[i]   = p.material_defs.type_basic_mat if p.flags[:SEED] and p.flags[:BIOME_SUBTERRANEAN_WATER]
+            end
+            df.world.raws.creatures.all.length.times do |i|
+                c = df.world.raws.creatures.all[i]
+                c.material.length.times do |j|
+                    if c.material[j].reaction_product.id.include?('CHEESE_MAT')
+                        MilkCreatures[i] = j + DFHack::MaterialInfo::CREATURE_BASE
+                        break
+                    end
+                end
+            end
+        end
+
+        def count_seeds
+            @farmplots = Hash.new(0)
+            ai.plan.find_room(:farmplot) { |r|
+                next unless bld = r.dfbuilding
+
+                4.times { |season|
+                    @farmplots[[season, bld.plant_id[season]]] += 1
+                }
+
+                false # search all farm plots
+            }
+            @seeds = Hash.new(0)
+            bags = Hash.new { |h, k| h[k] = [] }
+            df.world.items.other[:SEEDS].each { |i|
+                if is_item_free(i)
+                    @seeds[i.mat_index] += i.stack_size
+
+                    bag = i.general_refs.grep(DFHack::GeneralRefContainedInItemst).first
+                    bags[[bag.item_id, i.mat_index]] << i if bag
+                end
+            }
+            bags.values.each { |items|
+                if items.length > 1
+                    items[1...items.length].each { |i|
+                        items.first.stack_size += i.stack_size
+                        i.flags.removed = i.flags.garbage_collect = true
+                    }
+                    ai.debug "combined #{items.length} stacks of #{df.decode_mat(items.first)}"
+                end
+            }
+            @updating_seeds = false
+        end
+
+        def count_plants
+            @plants = Hash.new(0)
+            df.world.items.other[:PLANT].each { |i|
+                @plants[i.mat_index] += i.stack_size if is_item_free(i)
+            }
+            df.world.items.other[:PLANT_GROWTH].each { |i|
+                @plants[i.mat_index] += i.stack_size if is_item_free(i)
+            }
+            @updating_plants = false
+        end
+
+        def ban_cooking(material, type, subtype=-1)
+            @ai.debug "ban_cooking #{material}"
+            material = df.decode_mat(material)
+            df.ui.kitchen.item_types.length.times do |i|
+                next if df.ui.kitchen.item_types[i]    != type
+                next if df.ui.kitchen.item_subtypes[i] != subtype
+                next if df.ui.kitchen.mat_types[i]     != material.mat_type
+                next if df.ui.kitchen.mat_indices[i]   != material.mat_index
+                return
+            end
+            df.ui.kitchen.item_types    << type
+            df.ui.kitchen.item_subtypes << subtype
+            df.ui.kitchen.mat_types     << material.mat_type
+            df.ui.kitchen.mat_indices   << material.mat_index
+            df.ui.kitchen.exc_types     << 1
         end
 
         def act(key)
@@ -130,6 +288,14 @@ class DwarfAI
             end
         end
 
+        DrinkPlants   = {} # plants that can be brewed in their basic form
+        DrinkFruits   = {} # plants that have a growth that can be brewed
+        ThreadPlants  = {} # plants that can be made into thread
+        MillPlants    = {} # plants that can be milled
+        BagPlants     = {} # plants that can be processed into a bag
+        DyePlants     = {} # plants that can be milled that are able to dye cloth
+        GrowPlants    = {} # plants that we can grow underground
+        MilkCreatures = {} # creatures that have milk that can be turned into cheese
 
         # count unused stocks of one type of item
         def count_stocks(k)
@@ -145,12 +311,23 @@ class DwarfAI
             when :bucket
                 df.world.items.other[:BUCKET]
             when :food
-                df.world.items.other[:ANY_GOOD_FOOD].reject { |i|
-                    case i
-                    when DFHack::ItemSeedsst, DFHack::ItemBoxst, DFHack::ItemFishRawst
-                        true
-                    end
-                }
+                df.world.items.other[:ANY_GOOD_FOOD].grep(DFHack::ItemFoodst)
+            when :food_ingredients
+                forbidden = {}
+                df.ui.kitchen.item_types.to_a.zip(df.ui.kitchen.item_subtypes.to_a, df.ui.kitchen.mat_types.to_a, df.ui.kitchen.mat_indices.to_a).each do |x|
+                    forbidden[x] = true
+                end
+
+                df.world.items.other[:ANY_COOKABLE].reject do |item|
+                    item.kind_of?(DFHack::ItemFlaskst) or
+                    item.kind_of?(DFHack::ItemCagest) or
+                    item.kind_of?(DFHack::ItemBarrelst) or
+                    item.kind_of?(DFHack::ItemBucketst) or
+                    item.kind_of?(DFHack::ItemAnimaltrapst) or
+                    item.kind_of?(DFHack::ItemBoxst) or
+                    item.kind_of?(DFHack::ItemToolst) or
+                    forbidden[[item.getType, item.getSubtype, item.getMaterial, item.getMaterialIndex]]
+                end
             when :drink
                 df.world.items.other[:DRINK]
             when :soap, :coal, :ash
@@ -170,6 +347,8 @@ class DwarfAI
                 df.world.items.other[:BOULDER].find_all { |i| is_gypsum(i) }
             when :raw_adamantine
                 df.world.items.other[:BOULDER].grep(df.decode_mat('INORGANIC:RAW_ADAMANTINE'))
+            when :raw_fish
+                df.world.items.other[:FISH_RAW]
             when :splint
                 df.world.items.other[:SPLINT]
             when :crutch
@@ -178,26 +357,42 @@ class DwarfAI
                 df.world.items.other[:WEAPON].find_all { |i|
                     i.subtype.subtype == ManagerSubtype[:MakeBoneCrossbow]
                 }
-            when :pigtail, :dimplecup, :quarrybush
-                # TODO generic handling, same as farm crops selection
-                # TODO filter rotten
-                mspec = {
-                    :pigtail => 'PLANT:GRASS_TAIL_PIG:STRUCTURAL',
-                    :dimplecup => 'PLANT:MUSHROOM_CUP_DIMPLE:STRUCTURAL',
-                    :quarrybush => 'PLANT:BUSH_QUARRY:STRUCTURAL',
+            when :drink_plant, :thread_plant, :mill_plant, :bag_plant
+                plant = {
+                    :drink_plant  => DrinkPlants,
+                    :thread_plant => ThreadPlants,
+                    :mill_plant   => MillPlants,
+                    :bag_plant    => BagPlants,
                 }[k]
-                df.world.items.other[:PLANT].grep(df.decode_mat(mspec))
-            when :pigtail_seeds, :dimplecup_seeds
-                mspec = {
-                    :pigtail_seeds => 'PLANT:GRASS_TAIL_PIG:SEED',
-                    :dimplecup_seeds => 'PLANT:MUSHROOM_CUP_DIMPLE:SEED',
+                df.world.items.other[:PLANT].find_all do |i|
+                    plant[i.mat_index] == i.mat_type
+                end
+            when :drink_fruit
+                df.world.items.other[:PLANT_GROWTH].find_all do |i|
+                    DrinkFruits[i.mat_index] == i.mat_type
+                end
+            when :honey
+                df.world.items.other[:LIQUID_MISC].grep(df.decode_mat('CREATURE:HONEY_BEE:HONEY'))
+            when :milk
+                df.world.items.other[:LIQUID_MISC].find_all do |i|
+                    MilkCreatures[i.mat_index] == i.mat_type
+                end
+            when :dye_plant
+                df.world.items.other[:PLANT].find_all do |i|
+                    MillPlants[i.mat_index] == i.mat_type and DyePlants[i.mat_index]
+                end
+            when :thread_seeds, :dye_seeds
+                plant = {
+                    :thread_seeds => ThreadPlants,
+                    :dye_seeds    => DyePlants,
                 }[k]
-                df.world.items.other[:SEEDS].grep(df.decode_mat(mspec))
-            when :dimple_dye
-                mspec = 'PLANT:MUSHROOM_CUP_DIMPLE:MILL'
-                df.world.items.other[:POWDER_MISC].grep(df.decode_mat(mspec))
-            when :leaves
-                df.world.items.other[:LEAVES]
+                df.world.items.other[:SEEDS].find_all do |i|
+                    plant[i.mat_index] and GrowPlants[i.mat_index]
+                end
+            when :dye
+                df.world.items.other[:POWDER_MISC].find_all do |i|
+                    DyePlants[i.mat_index] == i.mat_type
+                end
             when :block
                 df.world.items.other[:BLOCKS]
             when :skull
@@ -211,6 +406,13 @@ class DwarfAI
                 }.inject(0) { |s, i|
                     # corpsepieces uses this instead of i.stack_size
                     s + i.material_amount[:Bone]
+                }
+            when :shell
+                return df.world.items.other[:CORPSEPIECE].find_all { |i|
+                    i.corpse_flags.shell and not i.corpse_flags.unbutchered
+                }.inject(0) { |s, i|
+                    # corpsepieces uses this instead of i.stack_size
+                    s + i.material_amount[:Shell]
                 }
             when :wool
                 df.world.items.other[:CORPSEPIECE].find_all { |i|
@@ -245,6 +447,10 @@ class DwarfAI
                 return df.world.buildings.other[:COFFIN].find_all { |bld| !bld.owner and !bld.burial_mode.no_pets }.length
             when :weapon
                 return count_stocks_weapon
+            when :pick
+                return count_stocks_weapon(:MINING)
+            when :axe
+                return count_stocks_weapon(:AXE)
             when :armor
                 return count_stocks_armor
             when :clothes
@@ -258,7 +464,7 @@ class DwarfAI
                 df.world.items.other[:POWDER_MISC].find_all { |i|
                     mat = df.decode_mat(i) and mat.inorganic and mat.inorganic.id == 'PLASTER'
                 }
-            when :wheelbarrow, :minecart, :nestbox, :hive, :jug
+            when :wheelbarrow, :minecart, :nestbox, :hive, :jug, :stepladder
                 ord = FurnitureOrder[k]
                 df.world.items.other[:TOOL].find_all { |i|
                     i.subtype.subtype == ManagerSubtype[ord] and
@@ -278,7 +484,6 @@ class DwarfAI
             when :tallow
                 df.world.items.other[:GLOB].find_all { |i|
                     mat = df.decode_mat(i) and mat.material and mat.material.id == 'TALLOW'
-                    # TODO filter rotten
                 }
             when :giant_corkscrew
                 df.world.items.other[:TRAPCOMP].find_all { |i|
@@ -289,6 +494,12 @@ class DwarfAI
             when :quern
                 # include used in building
                 return df.world.items.other[:QUERN].length
+            when :anvil
+                df.world.items.other[:ANVIL]
+            when :slab
+                df.world.items.other[:SLAB].find_all { |i|
+                    i.engraving_type == :Slab
+                }
             else
                 return find_furniture_itemcount(k)
 
@@ -298,11 +509,12 @@ class DwarfAI
         end
 
         # return the minimum of the number of free weapons for each subtype used by current civ
-        def count_stocks_weapon
+        def count_stocks_weapon(skill=nil)
             ue = df.ui.main.fortress_entity.entity_raw.equipment
             [[:WEAPON, ue.digger_tg],
              [:WEAPON, ue.weapon_tg]].map { |oidx, idefs|
                 idefs.to_a.map { |idef|
+                    next if skill and idef.skill_melee != skill
                     next if idef.flags[:TRAINING]
                     df.world.items.other[oidx].find_all { |i|
                         i.subtype.subtype == idef.subtype and
@@ -359,11 +571,19 @@ class DwarfAI
 
         # make it so the stocks of 'what' rises by 'amount'
         def queue_need(what, amount)
+            return if amount <= 0
+
             case what
             when :weapon
-                return queue_need_weapon
+                return queue_need_weapon(Needed[:weapon])
+            when :pick
+                return queue_need_weapon(Needed[:pick], :MINING)
+            when :axe
+                return queue_need_weapon(Needed[:axe], :AXE)
             when :armor
                 return queue_need_armor
+            when :anvil
+                return queue_need_anvil
             when :clothes
                 return queue_need_clothes
             when :coffin_bld
@@ -393,43 +613,51 @@ class DwarfAI
                 end
                 return
 
-            when :pigtail_seeds, :dimplecup_seeds
+            when :thread_seeds, :dye_seeds
                 # only useful at game start, with low seeds stocks
                 input = {
-                    :pigtail_seeds => [:pigtail],
-                    :dimplecup_seeds => [:dimplecup, :bag],
+                    :thread_seeds => [:thread_plant],
+                    :dye_seeds    => [:dye_plant, :bag],
                 }[what]
 
                 order = {
-                    :pigtail_seeds => :ProcessPlants,
-                    :dimplecup_seeds => :MillPlants,
+                    :thread_seeds => :ProcessPlants,
+                    :dye_seeds    => :MillPlants,
                 }[what]
 
-            when :dimple_dye
+            when :dye
                 order = :MillPlants
-                input = [:dimplecup, :bag]
+                input = [:dye_plants, :bag]
 
             when :wood
                 # dont bother if the last designated tree is not cut yet
-                return if @last_cutpos and @last_cutpos.offset(0, 0, 0).designation.dig == :Default
+                return if cutting_trees?
 
                 amount *= 2
+                amount = 30 if amount > 30
                 tl = tree_list
-                tl.each { |t| amount -= 1 if df.map_tile_at(t).designation.dig == :Default }
-                @last_cutpos = cuttrees(amount, tl) if amount > 0
+                tl.each { |t|
+                    amount -= 6 if tile = df.map_tile_at(*t) and tile.designation and tile.designation.dig == :Default
+                }
+                @last_cutpos = cuttrees(amount/6, tl) if amount > 6
                 return
 
+            when :honey
+                order = :PressHoneycomb
+                input = [:honeycomb, :jug]
+
             when :drink
-                if @count[:food] <= 0
-                    amount = 0
-                elsif false
-                    mt = df.world.raws.mat_table
-                    mt.organic_types[:Plants].length.times { |i|
-                        plant = df.decode_mat(mt.organic_types[:Plants][i], mt.organic_indexes[:Plants][i]).plant
-                        t.plants[i]= plant.flags[:DRINK] if plant
-                    }
-                    # TODO count brewable
-                end
+                orders = {
+                    :drink_plant => :BrewDrinkPlant,
+                    :drink_fruit => :BrewDrinkFruit,
+                    :honey       => :BrewMead,
+                }
+                input = [[:drink_plant, :drink_fruit, :honey].max_by{ |i|
+                    c = count[i] || count_stocks(i)
+                    find_manager_orders(orders[i]).each { |o| c -= o.amount_left }
+                    c
+                }, :barrel]
+                order = orders[input.first]
                 amount = (amount+4)/5  # accounts for brewer yield, but not for input stack size
 
             when :block
@@ -458,25 +686,44 @@ class DwarfAI
                 input = [:gypsum, :bag]
             end
 
-            amount = 30 if amount > 30
             order ||= FurnitureOrder[what]
+            @ai.debug "stocks: need #{amount} #{order} for #{what}"
+
             if input
-                i_amount = input.map { |i| count[i] || count_stocks(i) }.min
-                amount = i_amount if amount > i_amount
+                i_amount = amount
+                input.each { |i|
+                    c = count[i] || count_stocks(i)
+                    i_amount = c if c < i_amount
+                    if c < amount and Needed[i]
+                        @ai.debug "stocks: want #{amount - c} more #{i} for #{i_amount}/#{amount} #{order}"
+                        queue_need(i, amount - c)
+                    end
+                }
+                amount = i_amount
             end
+
             if matcat = ManagerMatCategory[order]
                 i_amount = (count[matcat] || count_stocks(matcat)) - count_manager_orders_matcat(matcat, order)
+                if i_amount < amount and Needed[matcat]
+                    @ai.debug "stocks: want #{amount - i_amount} more #{matcat} for #{i_amount}/#{amount} #{order}"
+                    queue_need(matcat, amount - i_amount)
+                end
                 amount = i_amount if amount > i_amount
             end
-            find_manager_orders(order).each { |o| amount -= o.amount_left }
+
+            amount = 30 if amount > 30
+
+            find_manager_orders(order).each { |o| amount -= o.amount_total }
+
             return if amount <= 0
 
-            @ai.debug "stocks: queue #{amount} #{order}"
             add_manager_order(order, amount)
         end
 
         # forge weapons
-        def queue_need_weapon
+        def queue_need_weapon(needed, skill=nil)
+            return if not skill and (@count[:pick] == 0 or @count[:axe] == 0)
+
             bars = Hash.new(0)
             coal_bars = @count[:coal]
             coal_bars = 50000 if !df.world.buildings.other[:FURNACE_SMELTER_MAGMA].empty?
@@ -511,9 +758,10 @@ class DwarfAI
             [[ue.digger_tg, @metal_digger_pref],
              [ue.weapon_tg, @metal_weapon_pref]].each { |idefs, pref|
                 idefs.each { |idef|
+                    next if skill and idef.skill_melee != skill
                     next if idef.flags[:TRAINING]
 
-                    cnt = Needed[:weapon]
+                    cnt = needed
                     cnt -= df.world.items.other[:WEAPON].find_all { |i|
                         i.subtype.subtype == idef.subtype and is_item_free(i)
                     }.length
@@ -609,10 +857,60 @@ class DwarfAI
                                 :item_subtype => idef.subtype, :mat_type => 0, :mat_index => mi, :amount_left => nw, :amount_total => nw)
                         bars[mi] -= nw * need_bars
                         coal_bars -= nw
-                        cnt -= nw 
+                        cnt -= nw
                         break if may_forge_cache[mi]
                     }
                 }
+            }
+        end
+
+        def queue_need_anvil
+            bars = Hash.new(0)
+            coal_bars = @count[:coal]
+            coal_bars = 50000 if !df.world.buildings.other[:FURNACE_SMELTER_MAGMA].empty?
+
+            df.world.items.other[:BAR].each { |i|
+                bars[i.mat_index] += i.stack_size if i.mat_type == 0
+            }
+
+            # rough account of already queued jobs consumption
+            df.world.manager_orders.each { |mo|
+                if mo.mat_type == 0 and bars.has_key?(mo.mat_index)
+                    bars[mo.mat_index] -= 4*mo.amount_total
+                    coal_bars -= mo.amount_total
+                end
+            }
+
+            @metal_anvil_pref ||= (0...df.world.raws.inorganics.length).find_all { |mi|
+                df.world.raws.inorganics[mi].material.flags[:ITEMS_ANVIL]
+            }
+
+            may_forge_cache = CacheHash.new { |mi| may_forge_bars(mi) }
+
+            cnt = Needed[:anvil]
+            cnt -= @count[:anvil]
+
+            df.world.manager_orders.each { |mo|
+                cnt -= mo.amount_total if mo.job_type == :ForgeAnvil
+            }
+            return if cnt <= 0
+
+            need_bars = 1
+
+            @metal_anvil_pref.each { |mi|
+                break if bars[mi] < need_bars and may_forge_cache[mi]
+                nw = bars[mi] / need_bars
+                nw = coal_bars if nw > coal_bars
+                nw = cnt if nw > cnt
+                next if nw <= 0
+
+                @ai.debug "stocks: queue #{nw} ForgeAnvil #{df.world.raws.inorganics[mi].id}"
+                df.world.manager_orders << DFHack::ManagerOrder.cpp_new(:job_type => :ForgeAnvil, :unk_2 => -1,
+                    :item_subtype => -1, :mat_type => 0, :mat_index => mi, :amount_left => nw, :amount_total => nw)
+                bars[mi] -= nw * need_bars
+                coal_bars -= nw
+                cnt -= nw
+                break if may_forge_cache[mi]
             }
         end
 
@@ -661,7 +959,8 @@ class DwarfAI
 
         def queue_need_coffin_bld(amount)
             # dont dig too early
-            return if not @ai.plan.past_initial_phase 
+            return if not @ai.plan.find_room(:cemetary) { |r| r.status != :plan }
+
 
             # count actually allocated (plan wise) coffin buildings
             return if @ai.plan.find_room(:cemetary) { |r|
@@ -677,6 +976,8 @@ class DwarfAI
 
         # make it so the stocks of 'what' decrease by 'amount'
         def queue_use(what, amount)
+            return if amount <= 0
+
             case what
             when :metal_ore
                 queue_use_metal_ore(amount)
@@ -693,18 +994,21 @@ class DwarfAI
             when :raw_adamantine
                 order = :ExtractMetalStrands
 
-            when :pigtail, :dimplecup, :quarrybush
+            when :drink_plant, :drink_fruit, :thread_plant, :mill_plant, :bag_plant
                 order = {
-                    :pigtail => :ProcessPlants,
-                    :dimplecup => :MillPlants,
-                    :quarrybush => :ProcessPlantsBag,
+                    :drink_plant  => :BrewDrinkPlant,
+                    :drink_fruit  => :BrewDrinkFruit,
+                    :thread_plant => :ProcessPlants,
+                    :mill_plant   => :MillPlants,
+                    :bag_plant    => :ProcessPlantsBag,
                 }[what]
-                # stuff may rot/be brewn before we can process it
+                # stuff may rot/be brewed before we can process it
                 amount /= 2 if amount > 10
                 amount /= 2 if amount > 4
+                input = [:barrel] if order == :BrewDrinkPlant or order == :BrewDrinkFruit
                 input = [:bag] if order == :MillPlants or order == :ProcessPlantsBag
 
-            when :leaves
+            when :food_ingredients
                 order = :PrepareMeal
                 amount = (amount + 4) / 5
 
@@ -726,22 +1030,50 @@ class DwarfAI
                     amount /= 2 if amount > 4
                 end
 
+            when :shell
+                order = :DecorateWithShell
+
             when :wool
                 order = :SpinThread
 
             when :cloth_nodye
                 order = :DyeCloth
-                input = [:dimple_dye]
+                input = [:dye]
                 amount /= 2 if amount > 10
                 amount /= 2 if amount > 4
 
+            when :raw_fish
+                order = :PrepareRawFish
+
             when :honeycomb
                 order = :PressHoneycomb
+                input = [:jug]
+
+            when :honey
+                order = :BrewMead
+                input = [:barrel]
+
+            when :milk
+                order = :MakeCheese
+
+            when :tallow
+                order = :MakeSoap
+                input = [:lye]
             end
 
+            @ai.debug "stocks: use #{amount} #{order} for #{what}"
+
             if input
-                i_amount = input.map { |i| count[i] || count_stocks(i) }.min
-                amount = i_amount if amount > i_amount
+                i_amount = amount
+                input.each { |i|
+                    c = count[i] || count_stocks(i)
+                    i_amount = c if c < i_amount
+                    if c < amount and Needed[i]
+                        @ai.debug "stocks: want #{amount - c} more #{i} for #{i_amount}/#{amount} #{order}"
+                        queue_need(i, amount - c)
+                    end
+                }
+                amount = i_amount
             end
 
             amount = 30 if amount > 30
@@ -750,7 +1082,6 @@ class DwarfAI
 
             return if amount <= 0
 
-            @ai.debug "stocks: queue #{amount} #{order}"
             add_manager_order(order, amount)
         end
 
@@ -831,13 +1162,13 @@ class DwarfAI
             # return the bottom-rightest designated tree
             br = nil
             list.each { |tree|
-                t = df.map_tile_at(tree)
-                next if t.shape != :TREE
+                t = df.map_tile_at(tree[0], tree[1], tree[2])
+                next if t.tilemat != :TREE
                 next if t.designation.dig == :Default
                 next if list.length > 4*amount and rand(4) != 0
                 t.dig(:Default)
-                br = t if not br or (br.x & -16) < (t.x & -16) or
-                        ((br.x & -16) == (t.x & -16) and (br.y & -16) < (t.y & -16))
+                br = [t.x, t.y, t.z] if not br or (br[0] & -16) < (t.x & -16) or
+                        ((br[0] & -16) == (t.x & -16) and (br[1] & -16) < (t.y & -16))
                 amount -= 1
                 break if amount <= 0
             }
@@ -854,10 +1185,12 @@ class DwarfAI
 
             @last_treelist = (df.world.plants.tree_dry.to_a + df.world.plants.tree_wet.to_a).find_all { |p|
                 t = df.map_tile_at(p) and
-                t.shape == :TREE and
+                t.tilemat == :TREE and
                 not t.designation.hidden
             }.sort_by { |p|
                 (p.pos.x-fe.x)**2 + (p.pos.y-fe.y)**2 + ((p.pos.z-fe.z2)*4)**2
+            }.map { |p|
+                [p.pos.x, p.pos.y, p.pos.z]
             }
         end
 
@@ -868,6 +1201,7 @@ class DwarfAI
             !i.flags.trader and     # merchant's item
             !i.flags.in_job and     # current job input
             !i.flags.construction and
+            !i.flags.encased and
             !i.flags.removed and    # deleted object
             !i.flags.forbid and     # user forbidden (or dumped)
             !i.flags.in_chest and   # in infirmary (XXX dwarf owned items ?)
@@ -880,7 +1214,7 @@ class DwarfAI
                  !is_item_free(ir.item_tg, true) })) and
             (!i.flags.in_building or !i.general_refs.find { |ir| ir.kind_of?(DFHack::GeneralRefBuildingHolderst) and    # is not part of a building construction materials
              ir.building_tg.contained_items.find { |bi| bi.use_mode == 2 and bi.item == i } }) and
-             (!i.flags.on_ground or !df.map_tile_at(i).designation.hidden)      # i.flags.unk11?
+            (!i.flags.on_ground or (!df.map_tile_at(i).designation.hidden and df.map_tile_at(i).designation.flow_size < 4))
         end
 
 
@@ -1003,6 +1337,10 @@ class DwarfAI
         end
 
         ManagerRealOrder = {
+            :BrewDrinkPlant => :CustomReaction,
+            :BrewDrinkFruit => :CustomReaction,
+            :BrewMead => :CustomReaction,
+            :ProcessPlantsBag => :CustomReaction,
             :MakeSoap => :CustomReaction,
             :MakePlasterPowder => :CustomReaction,
             :PressHoneycomb => :CustomReaction,
@@ -1020,6 +1358,8 @@ class DwarfAI
             :MakeTrainingSpear => :MakeWeapon,
             :MakeGiantCorkscrew => :MakeTrapComponent,
             :ConstructWoodenBlocks => :ConstructBlocks,
+            :MakeWoodenStepladder => :MakeTool,
+            :DecorateWithShell => :DecorateWith,
         }
         ManagerMatCategory = {
             :MakeRope => :cloth, :MakeBag => :cloth,
@@ -1030,14 +1370,20 @@ class DwarfAI
             :MakeGiantCorkscrew => :wood, :MakePipeSection => :wood, :ConstructWoodenBlocks => :wood,
             :MakeBoneBolt => :bone, :MakeBoneCrossbow => :bone,
             :MakeQuiver => :leather, :MakeFlask => :leather, :MakeBackpack => :leather,
+            :MakeWoodenStepladder => :wood, :DecorateWithShell => :shell,
         }
         ManagerType = {   # no MatCategory => mat_type = 0 (ie generic rock), unless specified here
-            :ProcessPlants => -1, :ProcessPlantsBag => -1, :MillPlants => -1, :BrewDrink => -1,
+            :ProcessPlants => -1, :ProcessPlantsBag => -1, :MillPlants => -1, :BrewDrinkPlant => -1,
             :ConstructTractionBench => -1, :MakeSoap => -1, :MakeLye => -1, :MakeAsh => -1,
             :MakeTotem => -1, :MakeCharcoal => -1, :MakePlasterPowder => -1, :PrepareMeal => 4,
-            :DyeCloth => -1, :MilkCreature => -1, :PressHoneycomb => -1,
+            :DyeCloth => -1, :MilkCreature => -1, :PressHoneycomb => -1, :BrewDrinkFruit => -1,
+            :BrewMead => -1, :MakeCheese => -1, :PrepareRawFish => -1,
         }
         ManagerCustom = {
+            :ProcessPlantsBag => 'PROCESS_PLANT_TO_BAG',
+            :BrewDrinkPlant => 'BREW_DRINK_FROM_PLANT',
+            :BrewDrinkFruit => 'BREW_DRINK_FROM_PLANT_GROWTH',
+            :BrewMead => 'MAKE_MEAD',
             :MakeSoap => 'MAKE_SOAP_FROM_TALLOW',
             :MakePlasterPowder => 'MAKE_PLASTER_POWDER',
             :PressHoneycomb => 'PRESS_HONEYCOMB',
@@ -1058,7 +1404,8 @@ class DwarfAI
                 :MakeTrainingSpear => df.world.raws.itemdefs.weapons.find { |d| d.id == 'ITEM_WEAPON_SPEAR_TRAINING' }.subtype,
                 :MakeGiantCorkscrew => df.world.raws.itemdefs.trapcomps.find { |d| d.id == 'ITEM_TRAPCOMP_ENORMOUSCORKSCREW' }.subtype,
                 :MakeBoneBolt => df.world.raws.itemdefs.ammo.find { |d| d.id == 'ITEM_AMMO_BOLTS' }.subtype,
-                :MakeBoneCrossbow => df.world.raws.itemdefs.weapons.find { |d| d.id == 'ITEM_WEAPON_CROSSBOW' }.subtype
+                :MakeBoneCrossbow => df.world.raws.itemdefs.weapons.find { |d| d.id == 'ITEM_WEAPON_CROSSBOW' }.subtype,
+                :MakeWoodenStepladder => df.world.raws.itemdefs.tools.find { |d| d.tool_use.include?(:STAND_AND_WORK_ABOVE) }.subtype
         end
 
         df.onstatechange_register { |st|
@@ -1135,7 +1482,6 @@ class DwarfAI
             :bucket => :MakeBucket,
             :barrel => :MakeBarrel,
             :bin => :ConstructBin,
-            :drink => :BrewDrink,
             :crutch => :ConstructCrutch,
             :splint => :ConstructSplint,
             :bag => :MakeBag,
@@ -1158,7 +1504,8 @@ class DwarfAI
             :backpack => :MakeBackpack,
             :giant_corkscrew => :MakeGiantCorkscrew,
             :pipe_section => :MakePipeSection,
-            :coal => :MakeCharcoal
+            :coal => :MakeCharcoal,
+            :stepladder => :MakeWoodenStepladder
 
         FurnitureFind = Hash.new { |h, k|
             sym = "item_#{k}st".to_sym
@@ -1166,7 +1513,8 @@ class DwarfAI
         }.update :chest => lambda { |o| o._rtti_classname == :item_boxst and o.mat_type == 0 },
                  :hive => lambda { |o| o._rtti_classname == :item_toolst and o.subtype.subtype == ManagerSubtype[FurnitureOrder[:hive]] },
                  :nestbox => lambda { |o| o._rtti_classname == :item_toolst and o.subtype.subtype == ManagerSubtype[FurnitureOrder[:nestbox]] },
-                 :trap => lambda { |o| o._rtti_classname == :item_trappartsst }
+                 :trap => lambda { |o| o._rtti_classname == :item_trappartsst },
+                 :stepladder => lambda { |o| o._rtti_classname == :item_toolst and o.subtype.subtype == ManagerSubtype[FurnitureOrder[:stepladder]] }
 
         # find one item of this type (:bed, etc)
         def find_furniture_item(itm)
@@ -1186,5 +1534,119 @@ class DwarfAI
             puts_err "df-ai stocks: cannot itemcount #{itm.inspect}", $!, $!.backtrace
             0
         end
+
+        def cutting_trees?
+            return false if not @last_cutpos
+            return true if t = df.map_tile_at(*@last_cutpos) and t.designation and t.designation.dig == :Default
+
+            if tree = tree_list.find { |t|
+                tile = df.map_tile_at(*t) and tile.designation and tile.designation.dig == :Default
+            }
+                @last_cutpos = tree
+                return true
+            end
+            @last_cutpos = nil
+            false
+        end
+
+        def farmplot(r, initial=true)
+            return unless bld = r.dfbuilding
+
+            subterranean = df.map_tile_at(r).designation.subterranean
+
+            may = []
+            df.world.raws.plants.all.length.times { |i|
+                p = df.world.raws.plants.all[i]
+                next if p.flags[:BIOME_SUBTERRANEAN_WATER] != subterranean
+                next if p.flags[:TREE] or not p.flags[:SEED]
+                may << i
+            }
+
+            # XXX 1st plot = the one with a door
+            isfirst = !r.layout.empty?
+            if r.subtype == :food
+                4.times { |season|
+                    pids = may.find_all { |i|
+                        p = df.world.raws.plants.all[i]
+
+                        # season numbers are also the 1st 4 flags
+                        next if not p.flags[season]
+
+                        pm = df.decode_mat(p.material_defs.type_basic_mat, p.material_defs.idx_basic_mat).material
+                        if isfirst
+                            pm.flags[:EDIBLE_RAW] and p.flags[:DRINK]
+                        else
+                            pm.flags[:EDIBLE_RAW] or pm.flags[:EDIBLE_COOKED] or p.flags[:DRINK] or
+                            (p.flags[:MILL] and mm = df.decode_mat(p.material_defs.type_mill, p.material_defs.idx_mill).material and (mm.flags[:EDIBLE_RAW] or mm.flags[:EDIBLE_COOKED])) or
+                            (bi = pm.reaction_product.id.index('BAG_ITEM') and bm = df.decode_mat(pm.reaction_product.material.mat_type[bi], pm.reaction_product.material.mat_index[bi]).material and (bm.flags[:EDIBLE_RAW] or bm.flags[:EDIBLE_COOKED]))
+                        end
+                    }.sort_by { |i|
+                        [[-@seeds[i], -1].max, @plants[i] - @seeds[i] + 18 * @farmplots[[season, i]]]
+                    }
+
+                    if pids.empty?
+                        @complained_about_no_plants ||= {}
+                        puts_err "AI: no legal plants for #{r.subtype} farm plot #{ai.plan.rooms.index(r)} in #{biome} season #{season}" unless @complained_about_no_plants[[r.subtype, biome, season]]
+                        @complained_about_no_plants[[r.subtype, biome, season]] = true unless isfirst
+                    else
+                        @farmplots[[season, bld.plant_id[season]]] -= 1 unless initial
+                        bld.plant_id[season] = pids.first
+                        @farmplots[[season, pids.first]] += 1 unless initial
+                    end
+                }
+            else
+                threads = may.find_all { |i|
+                    p = df.world.raws.plants.all[i]
+                    p.flags[:THREAD]
+                }
+                dyes = may.find_all { |i|
+                    p = df.world.raws.plants.all[i]
+                    p.flags[:MILL] and df.decode_mat(p.material_defs.type_mill, p.material_defs.idx_mill).material.flags[:IS_DYE]
+                }
+
+                4.times { |season|
+                    pids = threads.find_all { |i|
+                        p = df.world.raws.plants.all[i]
+                        p.flags[season]
+                    }
+                    # only grow dyes the first field if there is no cloth crop available
+                    if pids.empty? or !isfirst
+                        pids |= dyes.find_all { |i|
+                            p = df.world.raws.plants.all[i]
+                            p.flags[season]
+                        }
+                    end
+
+                    pids = pids.sort_by { |i|
+                        [[-@seeds[i], -50].max, @plants[i] - @seeds[i] + 18 * @farmplots[[season, i]]]
+                    }
+
+                    if pids.empty?
+                        @complained_about_no_plants ||= {}
+                        puts_err "AI: no legal plants for #{r.subtype} farm plot #{ai.plan.rooms.index(r)} in #{biome} season #{season}" unless @complained_about_no_plants[[r.subtype, biome, season]]
+                        @complained_about_no_plants[[r.subtype, biome, season]] = true unless isfirst
+                    else
+                        @farmplots[[season, bld.plant_id[season]]] -= 1 unless initial
+                        bld.plant_id[season] = pids.first
+                        @farmplots[[season, pids.first]] += 1 unless initial
+                    end
+                }
+            end
+        end
+
+        def queue_slab(histfig_id)
+            return if df.world.manager_orders.any? { |mo|
+                mo.job_type == :EngraveSlab and mo.hist_figure_id == histfig_id
+            }
+            o = DFHack::ManagerOrder.cpp_new(:job_type => :EngraveSlab, :unk_2 => -1, :item_subtype => -1,
+                :mat_type => 0, :mat_index => -1, :amount_left => 1, :amount_total => 1, :hist_figure_id => histfig_id)
+            df.world.manager_orders << o
+        end
+
+        def serialize
+            {} # we don't need to save any state
+        end
     end
 end
+
+# vim: et:sw=4:ts=4
